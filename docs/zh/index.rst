@@ -56,6 +56,22 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
 
 .. toctree::
    :maxdepth: 1
+   :caption: 面试与源码解读
+
+   interview_guide/README.md
+   interview_guide/01-project-overview.md
+   interview_guide/02-architecture-and-control-flow.md
+   interview_guide/03-synchronous-and-asynchronous-execution.md
+   interview_guide/04-data-pipeline.md
+   interview_guide/05-algorithms-and-losses.md
+   interview_guide/06-configuration-resources-and-weight-sync.md
+   interview_guide/07-extension-and-real-world-scenarios.md
+   interview_guide/08-debugging-reliability-and-performance.md
+   interview_guide/09-source-code-reading-guide.md
+   interview_guide/10-interview-question-bank.md
+
+.. toctree::
+   :maxdepth: 1
    :caption: Dense
 
    examples/qwen3-4B.md
