@@ -13,7 +13,6 @@ from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoTokenizer
 
 from slime.ray.train_actor import TrainRayActor
-from slime.utils import train_dump_utils
 from slime.utils.data import process_rollout_data
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.logging_utils import init_tracking
@@ -31,12 +30,19 @@ from slime.utils.types import RolloutBatch
 
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
+from . import train_dump_utils
 from .checkpoint import load_checkpoint
 from .cp_utils import prepare_routed_experts_for_routing_replay, slice_log_prob_with_cp
 from .data import DataIterator, get_data_iterator, log_perf_data, log_rollout_data
 from .hf_checkpoint_saver import save_hf_model_to_path
 from .initialize import init, is_megatron_main_rank
-from .loss import compute_advantages_and_returns, get_log_probs_and_entropy, get_values
+from .loss import (
+    compute_advantages_and_returns,
+    drain_captured_log_probs,
+    enable_log_prob_capture,
+    get_log_probs_and_entropy,
+    get_values,
+)
 from .model import forward_only, initialize_model_and_optimizer, save, train
 from .update_weight.common import named_params_and_buffers
 from .update_weight.update_weight_from_disk import UpdateWeightFromDisk
@@ -86,11 +92,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
         dist.barrier(group=get_gloo_group())
 
-        if args.offload_train:
-            if (x := args.train_memory_margin_bytes) > 0:
-                logger.info(f"Set torch_memory_saver.memory_margin_bytes to {x}")
-                torch_memory_saver.memory_margin_bytes = x
-
         self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
             args, role
         )
@@ -120,7 +121,7 @@ class MegatronTrainRayActor(TrainRayActor):
             source_getter=lambda: named_params_and_buffers(
                 self.args,
                 self.model,
-                convert_to_global_name=args.megatron_to_hf_mode == "raw",
+                convert_to_global_name=True,
             ),
             single_tag=None,
         )
@@ -143,7 +144,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.vocab_size is None:
             # Prefer HF config vocab_size (which may include model-native padding)
-            # over tokenizer vocab_size (which may be smaller, e.g. GPT-OSS).
+            # over tokenizer vocab_size, which may be smaller.
             hf_vocab = getattr(self.hf_config, "vocab_size", None)
             self.args.vocab_size = hf_vocab if hf_vocab is not None else self.tokenizer.vocab_size
 
@@ -228,6 +229,15 @@ class MegatronTrainRayActor(TrainRayActor):
 
         clear_memory()
         reload_process_groups()
+
+        if mpu.get_pipeline_model_parallel_world_size() > 2:
+            # Megatron's patched batched pipeline P2P uses the default WORLD
+            # group.  After reload, PP=4 starts with only the first two stages
+            # entering batch_isend_irecv(), but PyTorch requires every rank when
+            # that is the first NCCL operation on a group.  Prime WORLD here,
+            # after the memory saver is resumed, so later stages cannot miss its
+            # lazy initialization.  Sleep still destroys it completely.
+            dist.barrier(device_ids=[torch.cuda.current_device()])
         if self.role == "actor":
             self._switch_model("actor")
         print_memory("after wake_up model")
@@ -504,6 +514,13 @@ class MegatronTrainRayActor(TrainRayActor):
             # Train
             if self.args.use_routing_replay:
                 os.environ["ROUTING_REPLAY_STAGE"] = "replay_backward"
+            # When dumping train debug data but the actor log_probs were not
+            # recomputed separately (can_reuse_log_probs_in_loss / use_rollout_logprobs),
+            # snapshot them from the training forward so the dump still carries
+            # per-sample log_probs — at no extra forward pass.
+            capture_log_probs = self.args.save_debug_train_data is not None and "log_probs" not in rollout_data
+            if capture_log_probs:
+                enable_log_prob_capture()
             with timer("actor_train"):
                 train(
                     rollout_id,
@@ -514,6 +531,14 @@ class MegatronTrainRayActor(TrainRayActor):
                     num_microbatches,
                     global_batch_sizes,
                 )
+            if capture_log_probs:
+                captured = drain_captured_log_probs()
+                # `captured` is non-empty only on the last PP stage running a loss
+                # that snapshots log_probs (policy_loss), and then covers every
+                # local sample. Key it by this rank's `partition` to land in local
+                # sample order; skip otherwise (nothing to place).
+                if captured:
+                    rollout_data["log_probs"] = [captured[pos] for pos in rollout_data["partition"]]
 
             self.prof.step(rollout_id=rollout_id)
 
@@ -628,18 +653,21 @@ class MegatronTrainRayActor(TrainRayActor):
             destroy_process_groups()
 
     def load_other_checkpoint(self, model_tag: str, path: str) -> None:
-        old_args = self.args.load, self.args.no_load_optim, self.args.no_load_rng, self.args.finetune
+        old_args = (
+            self.args.load,
+            self.args.no_load_optim,
+            self.args.no_load_rng,
+            self.args.finetune,
+            self.args.ckpt_step,
+        )
         self.args.load = path
         self.args.no_load_optim = True
         self.args.no_load_rng = True
         self.args.finetune = True
 
-        old_ckpt_step = None
         if model_tag == "ref" and self.args.ref_ckpt_step is not None:
-            old_ckpt_step = self.args.ckpt_step
             self.args.ckpt_step = self.args.ref_ckpt_step
         elif model_tag == "teacher" and self.args.opd_teacher_ckpt_step is not None:
-            old_ckpt_step = self.args.ckpt_step
             self.args.ckpt_step = self.args.opd_teacher_ckpt_step
 
         _, _ = load_checkpoint(
@@ -649,10 +677,13 @@ class MegatronTrainRayActor(TrainRayActor):
             checkpointing_context={},
             skip_load_to_model_and_opt=False,
         )
-        self.args.load, self.args.no_load_optim, self.args.no_load_rng, self.args.finetune = old_args
-
-        if old_ckpt_step is not None:
-            self.args.ckpt_step = old_ckpt_step
+        (
+            self.args.load,
+            self.args.no_load_optim,
+            self.args.no_load_rng,
+            self.args.finetune,
+            self.args.ckpt_step,
+        ) = old_args
 
         self.weights_backuper.backup(model_tag)
         self._active_model_tag = model_tag
