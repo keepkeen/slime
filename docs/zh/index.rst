@@ -69,6 +69,7 @@ slime 的设计目标，是让这两大能力彼此强化，同时避免把系�
    interview_guide/08-debugging-reliability-and-performance.md
    interview_guide/09-source-code-reading-guide.md
    interview_guide/10-interview-question-bank.md
+   interview_guide/11-company-interview-questions.md
 
 .. toctree::
    :maxdepth: 1

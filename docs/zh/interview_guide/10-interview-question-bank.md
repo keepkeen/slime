@@ -1,6 +1,6 @@
 # 10. 面试题库与模拟追问
 
-> 适用快照：`main@aaf5c209`。题库中的“参考回答”是组织答案的骨架，不是逐字背诵稿。涉及生产规模、吞吐或稳定性的数字必须来自你自己的实验，不要用仓库宣传语代替证据。
+> 适用快照：`main@3778dbf6`（v0.3.2，扫描日期 2026-08-29）。题库中的“参考回答”是组织答案的骨架，不是逐字背诵稿。涉及生产规模、吞吐或稳定性的数字必须来自你自己的实验，不要用仓库宣传语代替证据。各厂公开面经的真题精讲见 [11. 厂商真题](11-company-interview-questions.md)。
 
 ## 1. 评分标准
 
@@ -108,7 +108,7 @@ optimizer step 在 Megatron 中更新 actor 参数；weight sync 把结果发布
 
 ### Q18：恢复时如何确定从哪一轮开始？
 
-训练 workers 从 checkpoint 初始化返回 next rollout id。非 PPO 时当前代码检查 actor 组内一致；PPO 时只采用并检查 critic 组内 IDs，并不比较 actor/critic，显式 start id 也不与 checkpoint 交叉校验。若启用全局数据集，再加载 `start_rollout_id - 1` 对应状态。生产上必须额外核对 actor/critic、optimizer、RNG、数据游标和 serving 权重；异步 driver 还可能让数据游标领先模型，当前不能承诺 exact resume。
+训练 workers 从 checkpoint 初始化返回 next rollout id。非 PPO 时当前代码检查 actor 组内一致；PPO 时只采用并检查 critic 组内 IDs，并不比较 actor/critic；显式 `--start-rollout-id` 自 #2236 起不再被参数校验覆盖为 0，但依旧不与 checkpoint 返回值交叉校验。若启用全局数据集，再加载 `start_rollout_id - 1` 对应状态。生产上必须额外核对 actor/critic、optimizer、RNG、数据游标和 serving 权重；异步 driver 还可能让数据游标领先模型，当前不能承诺 exact resume。
 
 ## 4. “异步”与 staleness
 
@@ -122,7 +122,7 @@ optimizer step 在 Megatron 中更新 actor 参数；weight sync 把结果发布
 
 ### Q21：fully-async 又有什么不同？
 
-专用后台 worker 在 round 边界外持续维持 in-flight generation，完成的 group 进入 warm queue，下一 training batch 不必绑定此前那批最慢任务。当前示例没有 evaluation、跨 round 顺序 best-effort，ABORTED group 会整组重排；一次 drain 若取到超过 target 的完成组，excess 还会在切片时丢弃。队列状态不随 checkpoint 持久化，也必须处理权重版本/staleness。
+专用后台 worker 在 round 边界外持续维持 in-flight generation，完成的 group 进入 warm queue，下一 training batch 不必绑定此前那批最慢任务。当前示例没有 evaluation、跨 round 顺序 best-effort，ABORTED group 会整组重排；每轮只按需取完成组，多余的留在队列供下一轮消费，并用队列水位对新任务做背压（早期版本会丢弃超出 target 的完成组，#2238 已修复）。队列状态不随 checkpoint 持久化，也必须处理权重版本/staleness。
 
 ### Q22：异步训练最大的算法风险是什么？
 
@@ -210,11 +210,11 @@ PPO clipped surrogate 在 ratio 越界区域可能形成梯度平台；CISPO 对
 
 ### Q40：on-policy distillation 是 estimator 吗？
 
-当前参数帮助明确说明 OPD 与 advantage estimator 正交：teacher reverse log-ratio penalty 会直接修改 estimator 产生的 advantage，随后仍进入对应 policy loss；它不是额外的独立 OPD objective。启动脚本中同时出现 GRPO 和 OPD 不矛盾。
+当前参数帮助明确说明 OPD 与 advantage estimator 正交：teacher reverse log-ratio penalty 会直接修改 estimator 产生的 advantage，随后仍进入对应 policy loss；它不是额外的独立 OPD objective。启动脚本中同时出现 GRPO 和 OPD 不矛盾。`rollout_temperature` 必须为正，student 与 teacher 都以同一个该温度计算 logprob；不要把 teacher 描述成另有一套蒸馏温度。
 
 ### Q41：怎样判断训练健康？
 
-联合看：reward 与 pass@k、zero-std、响应长度/截断率、entropy、PPO KL/ratio/clipfrac、rollout-vs-train logprob mismatch、grad norm/NaN、每阶段时间、token throughput、GPU 利用率、队列/等待。单独 reward 上升可能来自 reward hacking 或长度偏置。
+联合看：reward 与 pass@k、zero-std、响应长度/截断率、entropy、`rollout/kl`（raw current-reference）、`train/ppo_kl`（old-current signed log-ratio）、`train/train_rollout_logprob_abs_diff`（train-rollout 绝对差）、ratio/clipfrac、grad norm/NaN、每阶段时间、token throughput、GPU 利用率、队列/等待。三种指标比较对象不同；单独 reward 上升也可能来自 reward hacking 或长度偏置。
 
 ### Q42：为什么 estimator 名称不能代表完整算法？
 
@@ -276,7 +276,7 @@ custom generate 在多轮中调用检索服务，保留模型 query/answer token
 
 ### Q53：如何支持一个 Megatron 原生不完整支持的新模型？
 
-先判断只是权重映射还是模型层实现缺失：用 `slime_plugins/mbridge`/转换器处理 HF↔Megatron 映射；必要时用 model provider/ModuleSpec 或 HF module wrapper替换组件。然后补 key/shape round-trip、attention/rope、CP/TP 和小模型 E2E。当前文档提示被替换的 HF module 本身未必支持 TP，不能假设任意并行度。
+先判断只是权重映射还是模型层实现缺失：权重映射在内部化的 `slime/backends/megatron_utils/hf_to_megatron/`（加载）与 `megatron_to_hf/`（发布）按 `model_type` 注册转换（#2251 之前由 `slime_plugins/mbridge` 承担）；必要时用 model provider/ModuleSpec 或 HF module wrapper替换组件。然后补 key/shape round-trip、attention/rope、CP/TP 和小模型 E2E。当前文档提示被替换的 HF module 本身未必支持 TP，不能假设任意并行度。
 
 ### Q54：reward model 返回多个维度怎么办？
 

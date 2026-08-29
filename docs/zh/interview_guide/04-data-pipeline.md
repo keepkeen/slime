@@ -1,6 +1,6 @@
 # 04. 数据管线：从一行数据到一次 Actor 更新
 
-> **源码快照**：本文按 `main@aaf5c209` 撰写。slime 仍在快速演进；面试中若讨论其他版本，应先核对 `slime/utils/dp_schedule.py` 对 GBS 的定义。
+> **源码快照**：本文按 `main@3778dbf6`（v0.3.2，扫描日期 2026-08-29）撰写。slime 仍在快速演进；面试中若讨论其他版本，应先核对 `slime/utils/dp_schedule.py` 对 GBS 的定义。
 
 ## 先建立一张全景图
 
@@ -30,7 +30,7 @@ flowchart LR
 
 ### 1.1 JSONL、Parquet 与字段映射
 
-`read_file` 实际支持 `.jsonl` 和 `.parquet`：JSONL 逐行 `json.loads`，坏行会打印错误后跳过；Parquet 依赖 `pyarrow`，按 record batch 转成 Python dict 流式迭代（[`slime/utils/data.py#L25`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/data.py#L25)）。因此参数帮助中“目前只支持 JSONL”的说法已经落后于读取实现（[`slime/utils/arguments.py#L634`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L634)）。
+`read_file` 支持 `.jsonl` 和 `.parquet`：JSONL 逐行 `json.loads`，坏行会打印错误后跳过；Parquet 依赖 `pyarrow`，按 record batch 转成 Python dict 流式迭代（[`slime/utils/data.py#L24`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/data.py#L24)）。v0.3.2 的 `--prompt-data` 参数帮助也已明确列出 JSONL 与 Parquet，不再与读取实现冲突（[`slime/utils/arguments.py#L655`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L655)）。
 
 | 参数 | 默认值 | 写入位置 | 含义 |
 |---|---:|---|---|
@@ -46,11 +46,11 @@ flowchart LR
 {"prompt": [{"role": "user", "content": "计算 17×19"}], "answer": "323", "metadata": {"source": "math"}}
 ```
 
-对应参数是 `--input-key prompt --label-key answer --apply-chat-template`。`Dataset` 逐行构造 prompt、解析 tools、可选应用 tokenizer chat template，最后只先填充 `prompt/label/metadata/multimodal_inputs` 等字段；响应、奖励和 logprob 尚为空（[`slime/utils/data.py#L202`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/data.py#L202)）。
+对应参数是 `--input-key prompt --label-key answer --apply-chat-template`。`Dataset` 逐行构造 prompt、解析 tools、可选应用 tokenizer chat template，最后只先填充 `prompt/label/metadata/multimodal_inputs` 等字段；响应、奖励和 logprob 尚为空（[`slime/utils/data.py#L214`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/data.py#L214)）。
 
 ### 1.2 字符串 prompt 与 OpenAI messages
 
-`_build_messages` 的行为取决于是否需要 conversation 形式（[`slime/utils/data.py#L130`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/data.py#L130)）：
+`_build_messages` 的行为取决于是否需要 conversation 形式（[`slime/utils/data.py#L142`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/data.py#L142)）：
 
 - 普通字符串且既不应用 chat template、也没有多模态字段：保持字符串。
 - 字符串但需要 conversation：包装成 `[{'role': 'user', 'content': ...}]`。
@@ -61,7 +61,7 @@ flowchart LR
 
 ### 1.3 多模态的两份表示
 
-`--multimodal-keys '{"image":"images"}'` 会把消息里的 `<image>` 占位符按出现顺序替换为 OpenAI 风格的 content item，并严格检查占位符数和媒体数相等（[`slime/utils/data.py#L140`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/data.py#L140)）。图片、视频、音频的占位符定义见 [`slime/utils/types.py#L462`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/types.py#L462)。
+`--multimodal-keys '{"image":"images"}'` 会把消息里的 `<image>` 占位符按出现顺序替换为 OpenAI 风格的 content item，并严格检查占位符数和媒体数相等（[`slime/utils/data.py#L153`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/data.py#L153)）。图片、视频、音频的占位符定义见 [`slime/utils/types.py#L462`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/types.py#L462)。
 
 多模态沿管线保留两种表示：
 
@@ -70,11 +70,11 @@ flowchart LR
 | `multimodal_inputs` | 原始图片/视频等，如 PIL、路径或 URL 解析结果 | SGLang 请求构造 |
 | `multimodal_train_inputs` | processor 产生的 `pixel_values` 等张量 | Megatron actor forward |
 
-Dataset 先用 processor 提取原始视觉输入（[`slime/utils/data.py#L247`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/data.py#L247)）；生成时 `_prepare_prompt_ids` 必要时再次调用 processor，并缓存训练张量（[`slime/rollout/sglang_rollout.py#L43`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/sglang_rollout.py#L43)）。有图片时请求向 SGLang 发送 `text + image_data`，纯文本则发送 `input_ids`（[`slime/rollout/sglang_rollout.py#L174`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/sglang_rollout.py#L174)）。训练端把同一 micro-batch 的多模态张量按 key 拼接（[`slime/backends/megatron_utils/data.py#L150`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/data.py#L150)）。
+Dataset 阶段把媒体列解析进 `multimodal_inputs` 并完成占位符映射（[`slime/utils/data.py#L153`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/data.py#L153)）；过滤超长 prompt 时用 processor 计算含视觉 token 的真实长度（[`slime/utils/data.py#L98`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/data.py#L98)）；生成时 `_prepare_prompt_ids` 调用 processor，并把 `pixel_values` 等训练张量缓存到 `multimodal_train_inputs`（[`slime/rollout/sglang_rollout.py#L42`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L42)）。有图片时请求向 SGLang 发送 `text + image_data`，纯文本则发送 `input_ids`（[`slime/rollout/sglang_rollout.py#L175`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L175)）。训练端把同一 micro-batch 的多模态张量按 key 拼接（[`slime/backends/megatron_utils/data.py#L137`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/data.py#L137)）。
 
 ## 2. RolloutDataSource：prompt group 与三个 ID
 
-`RolloutDataSource` 持有 dataset offset、epoch、shuffle 状态和三个递增计数器；它还会保存/恢复这些状态，从而让断点续训继续消费同一数据位置（[`slime/rollout/data_source.py#L50`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/data_source.py#L50)）。
+`RolloutDataSource` 持有 dataset offset、epoch、shuffle 状态和三个递增计数器；它还会保存/恢复这些状态，从而让断点续训继续消费同一数据位置（[`slime/rollout/data_source.py#L50`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/data_source.py#L50)）。
 
 一次 `get_samples(P)` 取出 `P` 个 prompt。每个 prompt 深拷贝 `n_samples_per_prompt` 次，形成二维结构：
 
@@ -83,7 +83,7 @@ list[prompt group]
   └─ list[Sample]  # 同一 prompt 的 n 个独立采样
 ```
 
-源码在复制时设置 `group_index` 和 `index`（[`slime/rollout/data_source.py#L90`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/data_source.py#L90)）。三个 ID 的职责不能混用：
+源码在复制时设置 `group_index` 和 `index`（[`slime/rollout/data_source.py#L90`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/data_source.py#L90)）。三个 ID 的职责不能混用：
 
 | 标识 | 默认由谁设置 | 同一 prompt 的 n 个响应 | fan-out 兄弟样本 | 用途 |
 |---|---|---|---|---|
@@ -91,20 +91,20 @@ list[prompt group]
 | `index` | DataSource | 各不相同 | 深拷贝时可能相同 | 原始采样请求的全局身份、排序 |
 | `Sample.rollout_id` | 默认空；fan-out 自定义生成器必须设置 | 默认路径后续各自唯一 | **必须相同** | 训练 step 切分、per-rollout loss 归一化、GBS 计数 |
 
-还有一个容易混淆的同名量：外层训练循环的 `rollout_id` 参数表示第几轮“采样→训练”循环（例如 checkpoint/日志 step）；它不等于 `Sample.rollout_id`。后者是**一轮数据内部的逻辑训练单位 ID**。`Sample` 的字段和契约注释见 [`slime/utils/types.py#L93`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/types.py#L93)。
+还有一个容易混淆的同名量：外层训练循环的 `rollout_id` 参数表示第几轮“采样→训练”循环（例如 checkpoint/日志 step）；它不等于 `Sample.rollout_id`。后者是**一轮数据内部的逻辑训练单位 ID**。`Sample` 的字段和契约注释见 [`slime/utils/types.py#L94`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/types.py#L94)。
 
 ## 3. Sample 如何被 SGLang 补成轨迹
 
 ### 3.1 请求与返回
 
-`GenerateState` 保存 tokenizer/processor、采样参数和并发 semaphore；每个 prompt group 作为一个异步任务提交，组内采样并行执行（[`slime/rollout/sglang_rollout.py#L84`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/sglang_rollout.py#L84)）。默认 `generate`：
+`GenerateState` 保存 tokenizer/processor、采样参数和并发 semaphore；每个 prompt group 作为一个异步任务提交，组内采样并行执行（[`slime/rollout/sglang_rollout.py#L83`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L83)）。默认 `generate`：
 
 1. 准备 prompt token IDs；
 2. 向 `/generate` 发送 sampling params，并强制 `return_logprob=True`；
 3. 从 `output_token_logprobs` 拆出生成 token 和其 logprob；
-4. 调用 `append_response_tokens(..., trainable=True)` 写回 `Sample`（[`slime/rollout/sglang_rollout.py#L153`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/sglang_rollout.py#L153)）。
+4. 调用 `append_response_tokens(..., trainable=True)` 写回 `Sample`（[`slime/rollout/sglang_rollout.py#L152`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L152)）。
 
-`append_response_tokens` 同步维护 `tokens`、`response_length`、`rollout_log_probs` 和 `loss_mask`。模型生成 token 的 mask 为 1；工具/环境注入 token 应以 `trainable=False` 追加，mask 为 0、占位 logprob 为 0（[`slime/utils/types.py#L253`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/types.py#L253)）。这使多轮 agent 轨迹能把“模型动作”和“环境观察”放在同一 token 序列中，但只对模型动作反向传播。
+`append_response_tokens` 同步维护 `tokens`、`response_length`、`rollout_log_probs` 和 `loss_mask`。模型生成 token 的 mask 为 1；工具/环境注入 token 应以 `trainable=False` 追加，mask 为 0、占位 logprob 为 0（[`slime/utils/types.py#L253`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/types.py#L253)）。这使多轮 agent 轨迹能把“模型动作”和“环境观察”放在同一 token 序列中，但只对模型动作反向传播。
 
 必须始终满足：
 
@@ -122,21 +122,26 @@ len(tokens) == prompt_length + response_length
 | `ref_log_probs` | 冻结或周期更新的 reference model | KL reward shaping 或直接 KL loss |
 | `teacher_log_probs` | OPD teacher（Megatron 或 rollout 侧） | on-policy distillation 的 teacher target |
 
-“behavior”和“old”在理想 on-policy 情况下来自同一组权重，但数值仍可能因 SGLang 与 Megatron kernel、温度、top-p 截断、MoE 路由或权重陈旧而不同。Actor 训练流程会按配置切换 ref/teacher/old_actor 权重并计算相应 logprob（[`slime/backends/megatron_utils/actor.py#L414`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/actor.py#L414)）。若 `--use-rollout-logprobs`，优势和 policy ratio 选择 behavior logprob；否则默认使用训练引擎重算的 old logprob（[`slime/backends/megatron_utils/loss.py#L686`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L686)）。
+“behavior”和“old”在理想 on-policy 情况下来自同一组权重，但数值仍可能因 SGLang 与 Megatron kernel、温度、top-p 截断、MoE 路由或权重陈旧而不同。Actor 训练流程会按配置切换 ref/teacher/old_actor 权重并计算相应 logprob（[`slime/backends/megatron_utils/actor.py#L391`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/actor.py#L391)）。若 `--use-rollout-logprobs`，优势和 policy ratio 选择 behavior logprob；否则默认使用训练引擎重算的 old logprob（[`slime/backends/megatron_utils/loss.py#L731`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L731)）。
 
 ## 4. Reward、过滤与补采样
 
-默认路径先生成，再算奖励：普通 RM 对单个 sample 调用，`--group-rm` 则等组内所有结果返回后批量打分（[`slime/rollout/sglang_rollout.py#L223`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/sglang_rollout.py#L223)、[`slime/rollout/sglang_rollout.py#L294`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/sglang_rollout.py#L294)）。reward 可以是 float，也可以是 dict；`--reward-key` 决定从 dict 取哪个值（[`slime/utils/types.py#L246`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/types.py#L246)）。
+默认路径先生成，再算奖励：普通 RM 对单个 sample 调用，`--group-rm` 则等组内所有结果返回后批量打分（[`slime/rollout/sglang_rollout.py#L225`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L225)、[`slime/rollout/sglang_rollout.py#L297`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L297)）。reward 可以是 float，也可以是 dict；`--reward-key` 决定从 dict 取哪个值（[`slime/utils/types.py#L246`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/types.py#L246)）。
 
-当前 `--group-rm` 预期组内元素直接是 `Sample`；若 custom generate 返回 `list[Sample]` 形成 fan-out，嵌套列表会进入 group RM，现有实现会按 `Sample` 访问字段并失败。这个组合当前不能直接使用：应改为单 sample RM、在 custom rollout 中自行展平/分组，或先为嵌套 contract 补实现和测试。
+当前 `--group-rm` 与 custom generate 的 fan-out 输出（`list[Sample]`）不能直接组合：收集阶段可以保留嵌套的 `list[list[Sample]]`，但 group RM 分支随后按**扁平 `Sample` 序列** `zip(group, rewards)` 回写 reward，遇到嵌套元素时赋值对象和配对关系都是错的。应改为单 sample RM、在 custom rollout 中自行展平/分组，或先为嵌套 contract 补实现和测试。
 
-rollout loop 的目标是收满 `rollout_batch_size` 个**有效 prompt group**。它可以超采样，任一异步 group 完成后执行 dynamic filter；被丢弃的 group 不计入目标，继续从 DataSource 补请求（[`slime/rollout/sglang_rollout.py#L375`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/sglang_rollout.py#L375)）。收满后还可调用 `rollout_sample_filter` 做就地处理。
+rollout loop 的目标是收满 `rollout_batch_size` 个**有效 prompt group**。它可以超采样，任一异步 group 完成后执行 dynamic filter；被丢弃的 group 不计入目标，继续从 DataSource 补请求（[`slime/rollout/sglang_rollout.py#L374`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L374)）。收满后还可调用 `rollout_sample_filter` 做就地处理。
+
+这一段在 [PR #2250](https://github.com/THUDM/slime/pull/2250) 后多了两个轻量控制点：
+
+- **sample hooks**：`--rollout-sample-hook-path`（可重复）注册的钩子在**生成完成后、reward 之前**对每条 sample 执行，签名为 `hook(args, sample, *, rollout_id, evaluation, ...) -> Sample | None`，同步/异步均可，列表输入会递归保形处理（[`slime/rollout/sample_hooks.py#L39`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sample_hooks.py#L39)，调用点在 [`sglang_rollout.py#L264`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/sglang_rollout.py#L264)）；
+- **dynamic filter 的 fallback 语义**：filter 可返回带 `keep_when_insufficient` 的 `DynamicFilterOutput`（如内置 `check_reward_nonzero_std_with_fallback`），零方差组先标记为 fallback，仅在有效组不足时保留使用，避免为了补齐目标而再触发一整轮超采样（[`slime/rollout/filter_hub/base_types.py#L6`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/filter_hub/base_types.py#L6)）。
 
 `Sample.Status.FAILED` 本身主要用于观测，**不会自动让样本退出训练**。基础设施失败还要通过重试/回填、filter、`remove_sample=True` 或全零 mask 明确处理，否则转换阶段可能补出全 1 mask，坏样本仍会产生梯度。
 
-默认 reward post-process 在 flatten 后执行：GRPO/GSPO/CISPO/REINFORCE++ Baseline 可按 prompt 组减均值，前三者还可除以组内标准差（[`slime/ray/rollout.py#L682`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L682)）。这里有一个重要边界：默认实现靠固定 shape `reshape(-1, n_samples_per_prompt)` 推断分组；可变 fan-out 会退化为把整个 batch 当成一组。
+默认 reward post-process 在 flatten 后执行：GRPO/GSPO/CISPO/REINFORCE++ Baseline 可按 prompt 组减均值，前三者还可除以组内标准差（[`slime/ray/rollout.py#L279`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L279)）。这里有一个重要边界：默认实现靠固定 shape `reshape(-1, n_samples_per_prompt)` 推断分组；可变 fan-out 会退化为把整个 batch 当成一组。
 
-自定义 reward post-process 还必须先定义**逻辑 rollout 的 reward 语义**。如果希望同一 prompt 下的逻辑 rollouts 等权，应先按 `group_index` 分 prompt，再按 `rollout_id` 聚合 siblings 的 reward，基于逻辑 rollout 做均值/std，最后广播回 siblings。直接对全部物理 siblings 求均值会让 fan-out 更多的 rollout 权重更大。仓库的 fan-out test helper 展示了 hook 接线和按 `group_index` 分组，但仍对物理 siblings 求均值，不是所有 reward 语义下的通用正确答案（[`slime/rollout/_fanout_test_helpers.py#L76`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/_fanout_test_helpers.py#L76)）。
+自定义 reward post-process 还必须先定义**逻辑 rollout 的 reward 语义**。如果希望同一 prompt 下的逻辑 rollouts 等权，应先按 `group_index` 分 prompt，再按 `rollout_id` 聚合 siblings 的 reward，基于逻辑 rollout 做均值/std，最后广播回 siblings。直接对全部物理 siblings 求均值会让 fan-out 更多的 rollout 权重更大。仓库的 fan-out test helper 展示了 hook 接线和按 `group_index` 分组，但仍对物理 siblings 求均值，不是所有 reward 语义下的通用正确答案（[`tests/fanout_test_helpers.py#L73`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/tests/fanout_test_helpers.py#L73)）。
 
 ## 5. Fan-out contract：一次生成变成多条训练 Sample
 
@@ -152,7 +157,7 @@ prompt × response = list[list[Sample]]
 prompt × response × siblings = list[list[list[Sample]]]
 ```
 
-框架最终会递归 flatten，但 flatten 前会验证深度至少为 3 的 sibling list：每个 sibling 的 `Sample.rollout_id` 都非空且完全相同（[`slime/ray/rollout.py#L631`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L631)、[`slime/ray/rollout.py#L898`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L898)）。
+框架最终会递归 flatten，但 flatten 前会验证深度至少为 3 的 sibling list：每个 sibling 的 `Sample.rollout_id` 都非空且完全相同。验证实现已迁到 [`slime/observability/rollout_data_utils.py#L92`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/observability/rollout_data_utils.py#L92)，rollout manager 在 flatten 前调用它（[`slime/ray/rollout.py#L266`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L266)）。
 
 这个 contract 同时保证三件事：
 
@@ -164,7 +169,9 @@ prompt × response × siblings = list[list[list[Sample]]]
 
 ## 6. 从 Sample 列表到 RolloutBatch
 
-`RolloutManager.generate` 完成生成和日志后，依次调用 `_convert_samples_to_train_data` 与 `_split_train_data_by_dp`（[`slime/ray/rollout.py#L552`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L552)）。`RolloutBatch` 本质是 dict 类型别名，不是一个带行为的 class（[`slime/utils/types.py#L456`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/types.py#L456)）。
+`RolloutManager.generate` 完成生成和日志后，依次调用 `_convert_samples_to_train_data` 与 `_split_train_data_by_dp`；奖励后处理、转换和 DP 切分的当前入口分别在 [`slime/ray/rollout.py#L279`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L279)、[`#L306`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L306) 和 [`#L428`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L428)。`RolloutBatch` 本质是 dict 类型别名，不是一个带行为的 class（[`slime/utils/types.py#L459`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/types.py#L459)）。
+
+调试数据的落盘/回放实现也已从 rollout manager 拆到 observability：`load_debug_rollout_data` 与 `save_debug_rollout_data` 分别见 [`slime/observability/rollout_data_utils.py#L124`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/observability/rollout_data_utils.py#L124) 和 [`#L140`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/observability/rollout_data_utils.py#L140)。因此排查 dump contract 时应锚定该模块，`slime/ray/rollout.py` 只保留调用点。
 
 核心字段如下：
 
@@ -181,7 +188,7 @@ prompt × response × siblings = list[list[list[Sample]]]
 | `multimodal_train_inputs` | sample | 训练 processor 张量 |
 | `teacher_log_probs` | response token | 可选 OPD teacher |
 
-转换逻辑会为未设置的 `Sample.rollout_id` 合成互不冲突的唯一整数，并补默认全 1 mask；`remove_sample=True` 则把整条 response mask 清零（[`slime/ray/rollout.py#L709`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L709)）。随后按 `rollout_id` 预计算 `rollout_mask_sums`，即使 siblings 被 first-fit 拆到不同 micro-batch，分母仍是整个逻辑 rollout 的有效 token 总数。
+转换逻辑会为未设置的 `Sample.rollout_id` 合成互不冲突的唯一整数，并补默认全 1 mask；`remove_sample=True` 则把整条 response mask 清零（[`slime/ray/rollout.py#L306`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L306)）。随后按 `rollout_id` 预计算 `rollout_mask_sums`，即使 siblings 被 first-fit 拆到不同 micro-batch，分母仍是整个逻辑 rollout 的有效 token 总数。
 
 默认 loss reducer 可写成：
 
@@ -191,7 +198,7 @@ L_{\text{step}}=\frac{1}{|\mathcal R|}\sum_{r\in\mathcal R}
 {\max(1,\sum_{i:\rho_i=r}\sum_t m_{i,t})},
 $$
 
-其中 $\rho_i$ 是 sample 的 `rollout_id`，$m_{i,t}$ 是 `loss_mask`。实现中的 micro-batch closure 先产生各 rollout 的部分和，最后用 step GBS（逻辑 rollout 数）归一化；对应 reducer 见 [`slime/backends/megatron_utils/cp_utils.py#L47`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/cp_utils.py#L47)。开启 `--calculate-per-token-loss` 后则改为全 step 有效 token 加权，而不是每 rollout 等权。
+其中 $\rho_i$ 是 sample 的 `rollout_id`，$m_{i,t}$ 是 `loss_mask`。实现中的 micro-batch closure 先产生各 rollout 的部分和，最后用 step GBS（逻辑 rollout 数）归一化；对应 reducer 见 [`slime/backends/megatron_utils/cp_utils.py#L47`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/cp_utils.py#L47)。开启 `--calculate-per-token-loss` 后则改为全 step 有效 token 加权，而不是每 rollout 等权。
 
 ## 7. GBS 的真实口径：唯一 rollout ID 与术语漂移
 
@@ -203,7 +210,7 @@ $$
 N_{\text{step}}=\left\lfloor\frac{|\operatorname{unique}(\texttt{rollout\_ids})|}{\texttt{global\_batch\_size}}\right\rfloor
 $$
 
-切 step；每个 step 恰含 `global_batch_size` 个**逻辑 rollout**，同一 ID 的所有物理 samples 保持在同一 step，尾部不足一个完整 step 的 rollout 被丢弃（[`slime/utils/dp_schedule.py#L82`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/dp_schedule.py#L82)）。
+切 step；每个 step 恰含 `global_batch_size` 个**逻辑 rollout**，同一 ID 的所有物理 samples 保持在同一 step，尾部不足一个完整 step 的 rollout 被丢弃（[`slime/utils/dp_schedule.py#L82`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/dp_schedule.py#L82)）。
 
 参数后处理用下面的公式自动推导：
 
@@ -213,7 +220,7 @@ $$
 {\texttt{num\_steps\_per\_rollout}},
 $$
 
-见 [`slime/utils/arguments.py#L1916`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L1916)；quick-start 把这里笼统描述为 sample 数（[`docs/zh/get_started/quick_start.md#L151`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/docs/zh/get_started/quick_start.md#L151)），容易把物理片段与逻辑 rollout 混在一起。
+见 [`slime/utils/arguments.py#L1976`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L1976)。注意 scheduler 的真实口径是 distinct rollout ID；把 GBS 笼统说成“sample 数”容易把物理片段与逻辑 rollout 混在一起（早期 quick-start 文档曾有这种表述，现版已重写）。
 
 在仓库标准 contract 下，公式与 scheduler 是一致的：
 
@@ -226,7 +233,7 @@ $$
 
 ## 8. Step 内如何打包到 DP / CP
 
-调度顺序是 **先 pack，后 distribute**（[`slime/utils/dp_schedule.py#L1`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/dp_schedule.py#L1)）：
+调度顺序是 **先 pack，后 distribute**（[`slime/utils/dp_schedule.py#L1`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/dp_schedule.py#L1)）：
 
 ```mermaid
 flowchart TD
@@ -253,13 +260,13 @@ flowchart TD
 | dynamic | first-fit 按 token 容量装箱 | 容量为 `max_tokens_per_gpu × cp_size`；单条超长样本允许独占并超限 |
 | dynamic + `balance_by_flops` | 根据估算 FLOPs 分区 | 不保证 token cap，可能 OOM |
 
-所有 DP rank 在每个 step 必须运行相同 micro-batch 数，否则 pipeline 同步会失配。动态模式可继续拆最大多样本 bin 来满足 DP/VPP 对齐；静态模式不能随意拆，否则破坏固定 MBS 语义（[`slime/utils/dp_schedule.py#L117`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/dp_schedule.py#L117)）。
+所有 DP rank 在每个 step 必须运行相同 micro-batch 数，否则 pipeline 同步会失配。动态模式可继续拆最大多样本 bin 来满足 DP/VPP 对齐；静态模式不能随意拆，否则破坏固定 MBS 语义（[`slime/utils/dp_schedule.py#L163`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/dp_schedule.py#L163)）。
 
-训练端 `get_batch` 保存未拼接序列，按 CP rank 切 token，再把变长序列拼成一个一维 token stream，padding 后构造 `PackedSeqParams(qkv_format="thd")`；loss mask 用同样布局切分和拼接（[`slime/backends/megatron_utils/data.py#L28`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/data.py#L28)）。因此“packed sequence”是计算布局，不代表样本边界消失：`cu_seqlens`、`total_lengths`、`response_lengths` 与 mask 仍保留边界。
+训练端 `get_batch` 保存未拼接序列，按 CP rank 切 token，再把变长序列拼成一个一维 token stream，padding 后构造 `PackedSeqParams(qkv_format="thd")`；loss mask 用同样布局切分和拼接（[`slime/backends/megatron_utils/data.py#L14`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/data.py#L14)）。因此“packed sequence”是计算布局，不代表样本边界消失：`cu_seqlens`、`total_lengths`、`response_lengths` 与 mask 仍保留边界。
 
 ## 9. Actor train 的最后一公里
 
-每个 DP worker 收到只属于自己的 `RolloutBatch` 分片，先把 token/mask/logprob 等搬到 GPU。Actor 的顺序是（[`slime/backends/megatron_utils/actor.py#L346`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/actor.py#L346)）：
+每个 DP worker 收到只属于自己的 `RolloutBatch` 分片，先把 token/mask/logprob 等搬到 GPU。Actor 的顺序是（[`slime/backends/megatron_utils/actor.py#L341`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/actor.py#L341)）：
 
 1. 必要时切到 ref，得到 `ref_log_probs`；
 2. 必要时切到 teacher，得到 `teacher_log_probs`；
@@ -268,7 +275,7 @@ flowchart TD
 5. 按 `num_microbatches[step]` 运行 forward/backward；
 6. 每个 step 执行 optimizer 和 scheduler 更新。
 
-若 estimator 是 PPO，外层训练先启动 critic；critic 计算 values、训练 value head，并把旧 values 传给 actor，再由 actor 计算 GAE（[`train_async.py#L31`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/train_async.py#L31)、[`slime/backends/megatron_utils/actor.py#L386`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/actor.py#L386)）。其他 estimator 不会仅因名字自动创建 critic，详见下一章。
+若 estimator 是 PPO，外层训练先启动 critic；critic 计算 values、训练 value head，并把旧 values 传给 actor，再由 actor 计算 GAE（[`train_async.py#L36`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/train_async.py#L36)、[`slime/backends/megatron_utils/actor.py#L363`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/actor.py#L363)）。其他 estimator 不会仅因名字自动创建 critic，详见下一章。
 
 ## 10. 面试排障清单
 

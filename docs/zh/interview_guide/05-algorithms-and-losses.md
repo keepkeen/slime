@@ -1,6 +1,6 @@
 # 05. 算法与损失：从 RL 术语到 slime 的真实实现
 
-> **源码快照**：本文按 `main@aaf5c209` 撰写。算法名容易让人直接套论文公式；本文以 slime 的实际分支为准。
+> **源码快照**：本文按 `main@3778dbf6`（v0.3.2，扫描日期 2026-08-29）撰写。算法名容易让人直接套论文公式；本文以 slime 的实际分支为准。
 
 ## 先说最重要的结论
 
@@ -12,7 +12,7 @@
 --advantage-estimator ppo
 ```
 
-会自动令 `args.use_critic=True`（[`slime/utils/arguments.py#L1853`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L1853)），继而创建 critic（[`slime/ray/placement_group.py#L186`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/placement_group.py#L186)）。选择 GRPO、GSPO、CISPO 或两种 REINFORCE++ 都不会自动启 critic；自定义 advantage 函数也不会仅因“可能需要 value”而自动获得 critic。
+会自动令 `args.use_critic=True`（[`slime/utils/arguments.py#L1913`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L1913)），继而创建 critic（[`slime/ray/placement_group.py#L186`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/placement_group.py#L186)）。选择 GRPO、GSPO、CISPO 或两种 REINFORCE++ 都不会自动启 critic；自定义 advantage 函数也不会仅因“可能需要 value”而自动获得 critic。
 
 ## 1. 把 RL 基础术语映射到 slime
 
@@ -44,7 +44,7 @@ $$
 \ell_t^{ref}=\log\pi_{ref}(y_t\mid x,y_{<t}).
 $$
 
-SGLang 返回的是 `rollout_log_probs`，即 $\ell^{beh}$；Actor 在训练前 forward 得到 `log_probs`，通常承担 $\ell^{old}$；ref forward 得到 `ref_log_probs`；teacher 则是 `teacher_log_probs`。选择逻辑见 [`slime/backends/megatron_utils/actor.py#L414`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/actor.py#L414) 和 [`slime/backends/megatron_utils/loss.py#L686`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L686)。
+SGLang 返回的是 `rollout_log_probs`，即 $\ell^{beh}$；Actor 在训练前 forward 得到 `log_probs`，通常承担 $\ell^{old}$；ref forward 得到 `ref_log_probs`；teacher 则是 `teacher_log_probs`。选择逻辑见 [`slime/backends/megatron_utils/actor.py#L391`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/actor.py#L391) 和 [`slime/backends/megatron_utils/loss.py#L731`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L731)。
 
 ## 2. 公共骨架：ratio、clipping 与 reducer
 
@@ -63,7 +63,7 @@ r_t A_t,
 \right).
 $$
 
-源码把 `ppo_kl = old_log_probs - log_probs`，再计算 `ratio = exp(-ppo_kl)`，与上式完全一致（[`slime/backends/megatron_utils/loss.py#L963`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L963)、[`slime/utils/ppo_utils.py#L124`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L124)）。`eps_clip` 和 `eps_clip_high` 分别控制下界与上界。底层 `compute_policy_loss` 虽有 dual-clip 的 `eps_clip_c` 形参，但当前调用点没有传入该 CLI 值，因此不能把 dual-clip 当作这个快照中已接通的行为；需要先修调用并补测试。
+源码把 `ppo_kl = old_log_probs - log_probs`，再计算 `ratio = exp(-ppo_kl)`，与上式完全一致（[`slime/backends/megatron_utils/loss.py#L1032`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1032)、[`slime/utils/ppo_utils.py#L125`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L125)）。`eps_clip` 和 `eps_clip_high` 分别控制下界与上界。`compute_policy_loss` 还支持 [Dual-Clip PPO](https://arxiv.org/pdf/1912.09729) 的第三重下界 `--eps-clip-c`（对 $A<0$ 且 ratio 极大的 token 再套一层 `c·A` 下限，抑制“负优势 × 巨大 ratio”的梯度爆炸）；该形参曾长期未接通 CLI 值，自 [PR #2247](https://github.com/THUDM/slime/pull/2247) 起调用点已真正传入（[`loss.py#L1042`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1042)），并配套了 `tests/test_policy_loss.py` 回归——这是“读实现而不是读参数表”的典型案例。
 
 这里的 `ppo_kl` 是 $\ell^{old}-\ell^\theta$ 的有符号 log-ratio 统计，**不是 actor 对 reference 的 KL**。首次更新时 old 与 current 很接近，ratio 约为 1；同一 rollout 做多次 optimizer step 后，current 改变，clipping 才更频繁介入。
 
@@ -77,7 +77,7 @@ L=\frac{1}{|\mathcal R|}\sum_{r\in\mathcal R}
 {\max(1,\sum_{i:\rho_i=r}\sum_t m_{i,t})}.
 $$
 
-因此长 response 不会仅因 token 多而自动获得更大 trajectory 权重，fan-out 也不会仅因 siblings 多而放大。`--calculate-per-token-loss` 才会切换为全局有效 token 加权。分母在 rollout 侧预计算为 `rollout_mask_sums`，训练 reducer 见 [`slime/backends/megatron_utils/cp_utils.py#L47`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/cp_utils.py#L47)。
+因此长 response 不会仅因 token 多而自动获得更大 trajectory 权重，fan-out 也不会仅因 siblings 多而放大。`--calculate-per-token-loss` 才会切换为全局有效 token 加权。分母在 rollout 侧预计算为 `rollout_mask_sums`，训练 reducer 见 [`slime/backends/megatron_utils/cp_utils.py#L47`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/cp_utils.py#L47)。
 
 ### 2.3 entropy
 
@@ -87,7 +87,7 @@ $$
 L_{actor}=L_{pg}-c_H\,\mathbb E[H(\pi_\theta)],
 $$
 
-其中 $c_H$ 是 `entropy_coef`。源码中的 `entropy_loss` 指记录/相减的平均 entropy，本身不是带负号的交叉熵（[`slime/backends/megatron_utils/loss.py#L1046`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L1046)）。
+其中 $c_H$ 是 `entropy_coef`。源码中的 `entropy_loss` 指记录/相减的平均 entropy，本身不是带负号的交叉熵（[`slime/backends/megatron_utils/loss.py#L1111`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1111)）。
 
 ## 3. KL 有三条不同路径
 
@@ -95,12 +95,12 @@ $$
 
 ### 3.1 reward shaping：`kl_coef`
 
-逐 token 近似 KL 由 current/old 选定的 logprob 与 `ref_log_probs` 计算。以 `k1` 为例是 $\ell-\ell^{ref}$；`k2` 为平方近似；`k3/low_var_kl` 使用非负低方差形式（[`slime/utils/ppo_utils.py#L11`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L11)）。
+逐 token 近似 KL 由 current/old 选定的 logprob 与 `ref_log_probs` 计算。以 `k1` 为例是 $\ell-\ell^{ref}$；`k2` 为平方近似；`k3/low_var_kl` 使用非负低方差形式（[`slime/utils/ppo_utils.py#L12`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L12)）。
 
-- PPO：构造 $r_t=-\beta KL_t$，并在最后一个 response token 加序列 reward，再做 GAE。
+- PPO：构造新的 `token_level_rewards = -\beta KL_t`，并在最后一个 response token 加序列 reward，再做 GAE。v0.3.2 不再原地缩放 `rollout_data["kl"]`：reward shaping 使用新张量，供观测的 raw current/reference `rollout/kl` 保持未乘系数、未叠加序列 reward 的值（[`slime/backends/megatron_utils/loss.py#L769`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L769)）。
 - REINFORCE++：把 $-\beta KL_t$ 作为稠密 token reward，最后有效 token 加序列 reward，再反向折扣累计。
 - REINFORCE++ Baseline：优势是组基线后的 reward 广播，再减 $\beta KL_t$。
-- **GRPO/GSPO/CISPO 在该快照的 built-in branch 中，`get_grpo_returns` 只广播 rewards，传入的 `kl` 没有参与 returns**（[`slime/utils/ppo_utils.py#L361`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L361)）。因此不要仅凭 `kl_coef` 的通用 help 文案就断言它一定对这三者完成 reward shaping。
+- **GRPO/GSPO/CISPO 在该快照的 built-in branch 中，`get_grpo_returns` 只广播 rewards，传入的 `kl` 没有参与 returns**（[`slime/utils/ppo_utils.py#L361`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L361)）。因此不要仅凭 `kl_coef` 的通用 help 文案就断言它一定对这三者完成 reward shaping。
 
 ### 3.2 直接 KL loss：`use_kl_loss + kl_loss_coef`
 
@@ -110,15 +110,15 @@ $$
 L=L_{actor}+c_{KL}\,\widehat{KL}(\pi_\theta,\pi_{ref}).
 $$
 
-实现见 [`slime/backends/megatron_utils/loss.py#L1053`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L1053)。参数校验禁止 `kl_coef` 与 `kl_loss_coef` 同时非零（[`slime/utils/arguments.py#L1793`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L1793)），避免两套 reference 约束叠加后难以解释。
+实现见 [`slime/backends/megatron_utils/loss.py#L1115`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1115)。参数校验禁止 `kl_coef` 与 `kl_loss_coef` 同时非零（[`slime/utils/arguments.py#L1850`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L1850)），避免两套 reference 约束叠加后难以解释。
 
 ### 3.3 OPD teacher penalty
 
-OPD 是另一条正交路径：计算 student 与 teacher 的 reverse log-ratio，并从 advantages 中减去 `opd_kl_coef × reverse_kl`。它可叠加在任一 estimator 上，不应把 `teacher_log_probs` 当作 `ref_log_probs`（[`slime/backends/megatron_utils/loss.py#L620`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L620)）。
+OPD 是另一条正交路径：计算 student 与 teacher 的 reverse log-ratio，并从 advantages 中减去 `opd_kl_coef × reverse_kl`。它可叠加在任一 estimator 上，不应把 `teacher_log_probs` 当作 `ref_log_probs`（[`slime/backends/megatron_utils/loss.py#L663`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L663)）。`rollout_temperature` 必须严格为正；Megatron 的 student/teacher logprob forward 都由同一 `compute_log_prob` 路径按这个温度缩放 logits，SGLang teacher 请求也显式传入同一个温度，因此比较的是同温度分布，而不是 teacher 使用独立温度（[`slime/utils/arguments.py#L1774`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L1774)、[`slime/backends/megatron_utils/loss.py#L133`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L133)、[`slime/rollout/on_policy_distillation.py#L8`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/on_policy_distillation.py#L8)）。
 
 ## 4. 六种 estimator 在 slime 里到底做什么
 
-总入口是 `compute_advantages_and_returns`（[`slime/backends/megatron_utils/loss.py#L661`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L661)），policy loss 的二次分流在 [`slime/backends/megatron_utils/loss.py#L881`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L881)。
+总入口是 `compute_advantages_and_returns`（[`slime/backends/megatron_utils/loss.py#L704`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L704)），policy loss 的二次分流在 [`slime/backends/megatron_utils/loss.py#L933`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L933)。
 
 ### 4.1 GRPO
 
@@ -130,7 +130,7 @@ $$
 A_{g,i}=\frac{\widetilde R_{g,i}}{s_g+10^{-6}},
 $$
 
-其中 $\bar R_g$、$s_g$ 是组内均值和标准差。关闭 `grpo_std_normalization` 时只减均值，即 Dr.GRPO 风格。slime 在 rollout post-process 阶段先完成这个归一化，再把序列标量广播给每个 response token（[`slime/ray/rollout.py#L682`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L682)、[`slime/utils/ppo_utils.py#L361`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L361)）。
+其中 $\bar R_g$、$s_g$ 是组内均值和标准差。关闭 `grpo_std_normalization` 时只减均值，即 Dr.GRPO 风格。slime 在 rollout post-process 阶段先完成这个归一化，再把序列标量广播给每个 response token（[`slime/ray/rollout.py#L279`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L279)、[`slime/utils/ppo_utils.py#L361`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L361)）。
 
 随后仍使用 token-level PPO clipped surrogate。因此 slime 的 `grpo` 是“组相对 advantage + 通用 token clipped policy loss + 其他独立开关”的组合，不是一份自动补齐所有论文超参的 recipe。
 
@@ -146,7 +146,7 @@ r_{seq}(\theta)=\exp\left(
 \right).
 $$
 
-slime 先在完整序列上求平均 log-ratio，再把同一个值扩展到该序列各 token，进入相同 clipped surrogate（[`slime/utils/ppo_utils.py#L95`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L95)）。CP 场景会先 all-gather 完整 response，避免各 rank 用局部片段算出不同 sequence ratio。
+slime 先在完整序列上求平均 log-ratio，再把同一个值扩展到该序列各 token，进入相同 clipped surrogate（[`slime/utils/ppo_utils.py#L95`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L95)）。CP 场景会先 all-gather 完整 response，避免各 rank 用局部片段算出不同 sequence ratio。
 
 适合：长链推理、希望以序列为更新单位、降低单 token 极端 ratio 对 clipping 的支配。代价是需要完整序列聚合；sequence ratio 也可能掩盖少数 token 的严重偏移，所以仍需观察 behavior/train mismatch 和 entropy。
 
@@ -160,9 +160,9 @@ L_t^{CISPO}=-\operatorname{sg}\!\left[
 \right]A_t\ell_t^\theta,
 $$
 
-其中 $\operatorname{sg}$ 表示 stop-gradient（[`slime/utils/ppo_utils.py#L151`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L151)）。与 PPO 的 `min` surrogate 不同，ratio 被截断但 clipped token 仍通过 $\ell_t^\theta$ 贡献梯度。
+其中 $\operatorname{sg}$ 表示 stop-gradient（[`slime/utils/ppo_utils.py#L152`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L152)）。与 PPO 的 `min` surrogate 不同，ratio 被截断但 clipped token 仍通过 $\ell_t^\theta$ 贡献梯度。
 
-规范 CISPO 通常是单边/宽下界。slime 复用 delta-from-1 参数；若沿用默认 `eps_clip=0.2`，下界仍是 0.8。参数校验会告警，并建议将 `eps_clip=1.0` 关闭有效下界，再单独调 `eps_clip_high`（[`slime/utils/arguments.py#L1823`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L1823)）。
+规范 CISPO 通常是单边/宽下界。slime 复用 delta-from-1 参数；若沿用默认 `eps_clip=0.2`，下界仍是 0.8。参数校验会告警，并建议将 `eps_clip=1.0` 关闭有效下界，再单独调 `eps_clip_high`（[`slime/utils/arguments.py#L1883`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L1883)）。
 
 适合：希望极端 ratio 被截断、但不希望 PPO clipping 让相应 token 完全失去梯度。风险是 clip 边界语义配错，以及大 advantage/高学习率下仍可能不稳定。
 
@@ -176,7 +176,7 @@ r_t=-\beta KL_t+\mathbf 1[t=t_{last}]R,
 G_t=r_t+\gamma G_{t+1}.
 $$
 
-然后令 $A_t=G_t$，再做跨数据并行、按 mask 的 advantage whitening（实现要求显式 `--normalize-advantages`，否则参数校验失败）。折扣 return 的实现见 [`slime/utils/ppo_utils.py#L371`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L371)，强制归一化见 [`slime/utils/arguments.py#L1795`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L1795)。
+然后令 $A_t=G_t$，再做跨数据并行、按 mask 的 advantage whitening（实现要求显式 `--normalize-advantages`，否则参数校验失败）。两处实现细节在近期更新过：折扣 return 已从逐 token Python 循环改为 pad + `chunked_discounted_returns` 的向量化实现（[PR #2205](https://github.com/THUDM/slime/pull/2205)，见 [`slime/utils/ppo_utils.py#L371`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L371) 与 [`#L608`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L608)）；whitening 的归约组自 [PR #2235](https://github.com/THUDM/slime/pull/2235) 起使用**包含 context parallel 的 DP 组**（[`loss.py#L868`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L868)），修复了此前每个 CP rank 只用本地片段统计量做白化的偏差。强制归一化校验见 [`slime/utils/arguments.py#L1852`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L1852)。
 
 注意：在 slime 中它后续仍走通用 token-level clipped surrogate，并非朴素的 $-A_t\log\pi_\theta$ 单项实现。这正是“estimator 名称不等于完整 recipe”的典型例子。
 
@@ -190,7 +190,7 @@ $$
 A_{i,t}=(R_i-\bar R_g)-\beta KL_{i,t},
 $$
 
-再执行全局 masked advantage whitening。源码见 [`slime/utils/ppo_utils.py#L441`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L441)。它同样不启 critic，policy loss 同样是通用 token-level clipped surrogate。
+再执行全局 masked advantage whitening。源码见 [`slime/utils/ppo_utils.py#L448`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L448)。它同样不启 critic，policy loss 同样是通用 token-level clipped surrogate。
 
 适合：想用组 baseline 降低 REINFORCE 方差，又不想训练 critic。风险与 GRPO 相似：组内 reward 无差异时主要只剩 KL 信号；固定 shape reward 分组不适合不等长 fan-out。
 
@@ -208,7 +208,7 @@ A_t=\delta_t+\gamma\lambda A_{t+1},
 G_t=A_t+V_t.
 $$
 
-实现会在 CP 间恢复完整 response、padding 成 batch 后做 chunked GAE（[`slime/utils/ppo_utils.py#L471`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/ppo_utils.py#L471)）。Actor 用 $A_t$ 进入 clipped surrogate；critic 则用 clipped value loss：
+实现会在 CP 间恢复完整 response、padding 成 batch 后做 chunked GAE（[`slime/utils/ppo_utils.py#L476`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L476)）。Actor 用 $A_t$ 进入 clipped surrogate；critic 则用 clipped value loss：
 
 $$
 V_t^{clip}=V_t^{old}+\operatorname{clip}(V_t-V_t^{old},-\epsilon_v,\epsilon_v),
@@ -218,7 +218,7 @@ $$
 L_V=\max\left[(V_t-G_t)^2,(V_t^{clip}-G_t)^2\right].
 $$
 
-对应源码在 [`slime/backends/megatron_utils/loss.py#L1113`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L1113)。训练循环先训练 critic并返回 values，再训练 actor（[`train_async.py#L45`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/train_async.py#L45)）。
+对应源码在 [`slime/backends/megatron_utils/loss.py#L1175`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1175)。训练循环先训练 critic并返回 values，再训练 actor（[`train_async.py#L49`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/train_async.py#L49)）。
 
 适合：需要 token-level credit assignment、轨迹较长且愿意用 critic 降方差。成本是额外模型/显存/通信和 value 拟合不稳定；critic 偏差会直接污染 advantage。
 
@@ -263,7 +263,7 @@ flowchart TD
 7. **reducer**：per-rollout mean 还是 per-token mean？fan-out 的 `rollout_id` 是否正确？
 8. **on/off-policy**：采样权重多久同步一次？是否开启 TIS/OPSM？
 
-特别注意两组互斥/约束：`kl_coef` 与非零 `kl_loss_coef` 不能并用；`use_rollout_logprobs` 与 TIS 不能并用（[`slime/utils/arguments.py#L1793`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L1793)）。
+特别注意两组互斥/约束：`kl_coef` 与非零 `kl_loss_coef` 不能并用；`use_rollout_logprobs` 与 TIS 不能并用（[`slime/utils/arguments.py#L1850`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L1850)）。
 
 ## 7. 指标怎么读
 
@@ -277,16 +277,17 @@ flowchart TD
 | `response_lengths` / truncated | 输出长度与截断 | 与任务预期一致 | 长度奖励漏洞、max length 太小 |
 | `train/pg_loss` | policy gradient 项 | 有限、不过度震荡 | advantage/ratio/mask 数值异常 |
 | `train/pg_clipfrac` | 被 policy clipping 影响的比例 | 非长期 0，也非长期接近 1 | LR 太小/太大，old policy 太陈旧 |
+| `rollout/kl` | `kl_coef != 0` 时 advantage 阶段计算的 raw current/reference KL 估计；系数为 0 时是零占位 | 与 reference 约束预期相符 | 不是 old-current，也不是 train/rollout mismatch；PPO shaping 不再改写它 |
 | `train/ppo_kl` | old-current 的平均 signed log-ratio | on-policy 首步接近 0 | 不是 reference KL；偏大说明更新/陈旧度大 |
 | `train/kl_loss` | current-reference KL loss | 与设定约束相符 | reference 漂移或系数不合理 |
 | `train/entropy_loss` | 平均 policy entropy | 缓慢变化 | 骤降可能模式坍缩，骤升可能学不到 |
-| `train/train_rollout_logprob_abs_diff` | 训练 current 与所选 old/behavior 的差异 | 结合 step 与配置看 | `use_rollout_logprobs` 会改变比较对象；可能是 optimizer drift，也可能是 serving mismatch |
+| `train/train_rollout_logprob_abs_diff` | train 与 rollout logprob 的平均绝对差 | 结合 step 与配置看 | 默认比较 train-old 与 rollout；`use_rollout_logprobs` 时比较 current 与 rollout，后者也包含 optimizer drift |
 | `train/advantages` / `returns` | 优势和回报尺度 | 有限且分布不过度尖锐 | reward/KL/whitening/GAE 问题 |
 | `train/value_loss` / `value_clipfrac` | PPO critic 拟合与 clipping | loss 可控、clipfrac 不饱和 | critic LR、value clip、return 尺度不合适 |
 | `train/grad_norm` | 更新尺度 | 有限、无持续尖峰 | ratio/advantage 爆炸或坏样本 |
 | `train/global_batch_size` | 当前 step 的 distinct rollout ID 数 | 等于调度配置 | 全零 mask rollout 仍占 slot，不等于实际有梯度的 rollout 数 |
 
-policy loss 自带的指标键见 [`slime/backends/megatron_utils/loss.py#L1073`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L1073)，critic 指标见 [`slime/backends/megatron_utils/loss.py#L1162`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L1162)。rollout 日志使用与训练相同的 per-rollout 分母，以避免 DP 不均匀分片造成均值偏置（[`slime/backends/megatron_utils/data.py#L248`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/data.py#L248)）。
+policy loss 自带的指标键见 [`slime/backends/megatron_utils/loss.py#L1141`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1141)，critic 指标见 [`slime/backends/megatron_utils/loss.py#L1224`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1224)。`train/ppo_kl` 和 `train/train_rollout_logprob_abs_diff` 在 policy loss 中走训练 reducer；`rollout/kl` 不在 rollout logger 的 `per_rollout_mean_keys` 集合中，不能声称它使用同一个 per-rollout reducer（[`slime/observability/train_metric_utils.py#L178`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/observability/train_metric_utils.py#L178)）。
 
 ### 7.2 TIS / mismatch 指标
 
@@ -301,7 +302,9 @@ $$
 w_t^{beh\to train}=\exp(\ell_t^{train}-\ell_t^{beh})
 $$
 
-做 truncated importance sampling。`tis_clipfrac` 等用于观察 behavior correction 幅度；若大量 token 被截断/拒绝，说明数据已明显 off-policy，修正只能限损，不能替代更及时的权重同步。`train_rollout_logprob_abs_diff` 的比较对象还会随 `use_rollout_logprobs` 改变，多步 optimizer 造成的 current/old drift 不能一律诊断为 SGLang mismatch。TIS 的入口与原始 mask/修改后 mask 分母处理见 [`slime/backends/megatron_utils/loss.py#L986`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L986)。
+做 truncated importance sampling。`tis_clipfrac` 等用于观察 behavior correction 幅度；若大量 token 被截断/拒绝，说明数据已明显 off-policy，修正只能限损，不能替代更及时的权重同步。
+
+与 TIS 互补的还有两组开关：`--use-opsm`（Off-Policy Sequence Masking）先在**序列粒度**计算 mismatch，超阈值的整条序列直接不参与梯度，指标为 `opsm_clipfrac`（[`ppo_utils.py#L54`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/ppo_utils.py#L54)）；MoE 模型可再叠加 `--use-routing-replay` / `--use-rollout-routing-replay`，直接在训练 forward 中重放 rollout 的专家路由，从根源消除路由翻转造成的 mismatch（[`slime/utils/routing_replay.py`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/routing_replay.py)）。排查思路：先看路由与采样参数（根因），再决定 TIS/OPSM 的容错档位。`train_rollout_logprob_abs_diff` 的比较对象还会随 `use_rollout_logprobs` 改变，多步 optimizer 造成的 current/old drift 不能一律诊断为 SGLang mismatch。TIS 的入口与原始 mask/修改后 mask 分母处理见 [`slime/backends/megatron_utils/loss.py#L883`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L883)。
 
 ## 8. 常见失败模式与定位
 

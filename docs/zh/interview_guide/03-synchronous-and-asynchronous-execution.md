@@ -1,6 +1,6 @@
 # 03. 同步、流水异步与 fully-async：时序、陈旧度和选择
 
-> **适用源码快照**：本文基于 `main@aaf5c209`。异步语义高度依赖实现细节；下文的“一轮滞后”等结论仅对应这个快照的 `train_async.py` 与 `slime.rollout.fully_async_rollout`。
+> **适用源码快照**：本文基于 `v0.3.2@3778dbf6`（扫描日期 2026-08-29）。异步语义高度依赖实现细节；下文的“一轮滞后”等结论仅对应这个快照的 `train_async.py` 与 `slime.rollout.fully_async_rollout`。
 
 ## 先消除一个命名误区
 
@@ -20,7 +20,7 @@ slime 中至少有三种不同层次的“异步”：
 | N/N+1 流水 | `train_async.py` | 默认或自定义 | train(N) 与 generate(N+1) 重叠 | 默认同步间隔 1 时，N+1 相对训练结果滞后一轮 | 不支持 |
 | fully-async rollout | `train_async.py` | `generate_rollout_fully_async` | 常驻生成池跨越 rollout 调用，按完成顺序凑 batch | 不再是固定一轮；取决于在途任务与完成队列 | 不支持 |
 
-fully-async 不是第三个顶层 driver；示例明确同时要求 `train_async.py` 和专用 rollout function，见 [examples/fully_async/README.md](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/fully_async/README.md#L42)。
+fully-async 不是第三个顶层 driver；示例明确同时要求 `train_async.py` 和专用 rollout function，见 [examples/fully_async/README.md](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/fully_async/README.md#L42)。
 
 ## 模式一：`train.py` 的同步执行
 
@@ -36,11 +36,11 @@ generate(N, weights=W_N)
     -> generate(N+1, weights=W_(N+1))
 ```
 
-源码中 `ray.get(rollout_manager.generate.remote(...))` 先等待生成完成，之后 `ray.get(actor_model.async_train(...))` 等待训练完成，最后才 `actor_model.update_weights()`，见 [train.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/train.py#L48)。
+源码中 `ray.get(rollout_manager.generate.remote(...))` 先等待生成完成，之后 `ray.get(actor_model.async_train(...))` 等待训练完成，最后才 `actor_model.update_weights()`，见 [train.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/train.py#L49)。
 
 若配置了 eval 且没有 `--skip-eval-before-train`，同步 driver 还会在 rollout 0 的生成前执行一次 baseline eval；这是 `train_async.py` 当前没有的时间点。比较两种 driver 的指标曲线时必须对齐这个差异。
 
-### 时序图
+### 同步时序图
 
 ```mermaid
 gantt
@@ -73,7 +73,7 @@ gantt
 
 ## 模式二：`train_async.py` 的 N/N+1 流水
 
-异步 driver 先提交第一个 `generate(0)`。每轮开始时等待当前 future，然后**立刻提交下一轮 generate**，再训练当前 batch，见 [train_async.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/train_async.py#L31)。默认 `update_weights_interval=1` 时，时序是：
+异步 driver 先提交第一个 `generate(0)`。每轮开始时等待当前 future，然后**立刻提交下一轮 generate**，再训练当前 batch，见 [train_async.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/train_async.py#L32)。默认 `update_weights_interval=1` 时，时序是：
 
 ```text
 generate(N, W_N) 完成
@@ -84,7 +84,7 @@ generate(N, W_N) 完成
 下一轮：train(N+1) 与 generate(N+2, W_(N+1)) 重叠
 ```
 
-### 时序图
+### 异步时序图
 
 ```mermaid
 gantt
@@ -105,7 +105,7 @@ gantt
 
 ### 为什么 N+1 是一轮旧策略
 
-`generate(N+1)` 在 `train(N)` 之前提交；权重更新发生在 `train(N)` 结束后。为避免在生成中途换权重，driver 还会先 `ray.get` 等待 pending generation 完成，再调用 `update_weights()`，见 [train_async.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/train_async.py#L66)。因此默认同步间隔 1 时：
+`generate(N+1)` 在 `train(N)` 之前提交；权重更新发生在 `train(N)` 结束后。为避免在生成中途换权重，driver 还会先 `ray.get` 等待 pending generation 完成，再调用 `update_weights()`，见 [train_async.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/train_async.py#L66)。因此默认同步间隔 1 时：
 
 - batch N 用行为策略 `W_N` 生成；
 - 训练 N 后目标 actor 已变为 `W_(N+1)`；
@@ -115,13 +115,13 @@ gantt
 
 ### `update_weights_interval > 1` 会发生什么
 
-常规（非 `release_train`）运行只有满足 `(rollout_id + 1) % update_weights_interval == 0` 才同步，参数默认值为 1，见 [arguments.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/arguments.py#L526)。间隔增大时，同一 rollout 权重会覆盖更多 batch；staleness 不再简单等于一轮，而且在一个同步窗口内会逐步增大。`release_train` 是例外：driver 每轮都执行 full + disk 权重发布，并在该生命周期中释放训练 actors、让 rollout engines reload。
+常规（非 `release_train`）运行只有满足 `(rollout_id + 1) % update_weights_interval == 0` 才同步，参数默认值为 1，见 [arguments.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/arguments.py#L547)。间隔增大时，同一 rollout 权重会覆盖更多 batch；staleness 不再简单等于一轮，而且在一个同步窗口内会逐步增大。`release_train` 是例外：driver 每轮都执行 full + disk 权重发布，并在该生命周期中释放训练 actors、让 rollout engines reload。
 
 好处是减少大型模型权重 gather、格式转换、传输、pause/flush 的开销；风险是 behavior policy 与当前训练 policy 距离更大。是否可接受取决于学习率、每批 optimizer steps、clip/importance correction、reward 分布等，不能只看系统吞吐。
 
 ### 为什么不支持 colocate
 
-`train_async.py` 入口直接断言 `not args.colocate`，见 [train_async.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/train_async.py#L9)。原因是 N/N+1 的收益来自 train GPU 与 rollout GPU 同时工作；若两者占同一批卡，还要靠 offload 分时释放显存，就无法安全地同时驻留和计算。
+`train_async.py` 入口直接断言 `not args.colocate`，见 [train_async.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/train_async.py#L11)。原因是 N/N+1 的收益来自 train GPU 与 rollout GPU 同时工作；若两者占同一批卡，还要靠 offload 分时释放显存，就无法安全地同时驻留和计算。
 
 这是当前实现的硬限制，不是“性能不推荐”。需要 colocate 时应选 `train.py`。
 
@@ -144,12 +144,12 @@ gantt
 fully-async rollout 把“并发窗口”从单个 batch 提升到跨 batch 的常驻 worker：
 
 1. 第一次调用创建全局 `AsyncRolloutWorker`（后台 thread + asyncio loop）；
-2. worker 持续从 Data Buffer 取 group，把在途任务补满到固定 concurrency；
+2. worker 持续从 Data Buffer 取 group，把在途任务补满到固定 concurrency；完成队列积压到并发上限时会暂停取新 prompt，形成背压；
 3. 任意 group 完成后进入 `output_queue`；
-4. 每次 `generate_rollout_fully_async()` 只要收集到 `rollout_batch_size` 个已完成 group 就返回；
-5. 在途任务会跨调用保留；完成队列也会被下一次调用继续消费，但当前实现一次轮询会把队列全部 drain 到本地字典，最终只切出 target 个。若同一次 drain 得到的完成组超过 `rollout_batch_size`，多出的完成组不会放回队列，会被静默丢弃。
+4. 每次 `generate_rollout_fully_async()` 通过 `get_completed_groups(limit=...)` 只取本轮还缺的数量，凑够 `rollout_batch_size` 个已完成 group 就返回；
+5. 在途任务跨调用保留；多余的完成组留在队列中供下一轮直接消费（“queue stays warm” 契约），不会被丢弃。早期快照中一次轮询会 drain 整个队列并静默丢弃超出 target 的完成组，该缺陷已由 [PR #2238](https://github.com/THUDM/slime/pull/2238) 修复。
 
-常驻 worker 的创建和并发数计算见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/fully_async_rollout.py#L48)，补充任务的循环见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/fully_async_rollout.py#L115)，凑 batch 的逻辑见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/fully_async_rollout.py#L194)。
+常驻 worker 的创建和并发数计算见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/fully_async_rollout.py#L53)，带背压的补任务循环见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/fully_async_rollout.py#L131)，按需取完成组的逻辑见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/fully_async_rollout.py#L107) 与 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/fully_async_rollout.py#L228)。
 
 ### 逻辑时序
 
@@ -169,7 +169,7 @@ flowchart LR
     BN1 --> TrainN1[Train N+1]
 ```
 
-它缓解 head-of-line blocking：batch N 不必等待“最早发出但最慢”的那条任务，只需等待任意足够多的任务完成。输出在交给训练前按 `sample.index` 排序，但跨 rollout 的全局顺序只是 best effort，见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/fully_async_rollout.py#L233)。
+它缓解 head-of-line blocking：batch N 不必等待“最早发出但最慢”的那条任务，只需等待任意足够多的任务完成。输出在交给训练前按 `sample.index` 排序，但跨 rollout 的全局顺序只是 best effort，见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/fully_async_rollout.py#L251)。
 
 ### staleness 为什么不再固定为一轮
 
@@ -181,14 +181,13 @@ flowchart LR
 - train/rollout 相对速度；
 - 权重同步间隔和更新时的 abort/requeue。
 
-专用 worker 没有按 weight version 过滤已完成队列的逻辑，所以不能从源码保证“最多 stale 一轮”。权重更新期间若底层生成收到 abort 信号，包含 `ABORTED` sample 的 group 会被放回 Data Buffer，而不是交给训练，见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/fully_async_rollout.py#L169)。这防止已明确中止的轨迹污染 batch，但不等于清除所有已完成旧版本样本。
+专用 worker 没有按 weight version 过滤已完成队列的逻辑，所以不能从源码保证“最多 stale 一轮”。权重更新期间若底层生成收到 abort 信号，包含 `ABORTED` sample 的 group 会被放回 Data Buffer，而不是交给训练，见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/fully_async_rollout.py#L200)。这防止已明确中止的轨迹污染 batch，但不等于清除所有已完成旧版本样本。
 
 ### 当前限制
 
-- rollout entrypoint 明确拒绝 evaluation mode，见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/fully_async_rollout.py#L251)；若 `eval_function_path` 默认继承该函数，启用 eval 会失败，需要单独设计兼容的 eval 路径；
+- rollout entrypoint 明确拒绝 evaluation mode，见 [fully_async_rollout.py](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/fully_async_rollout.py#L272)；若 `eval_function_path` 默认继承该函数，启用 eval 会失败，需要单独设计兼容的 eval 路径；
 - 依赖可回填样本的 Data Buffer，代码断言启用 global dataset；
 - `ABORTED` 轨迹当前整组重新排队，不是从部分轨迹精确续跑；
-- 单次 drain 超过 target 的已完成 group 当前会被切片丢弃；这是实现限制，不应理解成有持久的无损完成队列；
 - active tasks、完成队列和预取后的 data-source offset 没有作为一个事务随模型 checkpoint 保存，因此当前不提供 exact resume 保证；
 - 由于它依赖 `train_async.py`，同样不能 colocate；
 - 吞吐提高不自动解决 off-policy 偏差，需要结合训练指标验证。

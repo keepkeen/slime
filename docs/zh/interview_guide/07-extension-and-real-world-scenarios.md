@@ -1,12 +1,12 @@
 # 07. 扩展点与真实场景：从一个 hook 到完整 Agentic RL
 
-> **快照说明**：本文基于 `main@aaf5c209`（2026-07-26）整理。扩展函数签名和示例会随代码演进；本文中的命令全部是**示例，不保证在本机直接运行**。第三方工具、搜索服务和 sandbox 还涉及网络、凭据与隔离策略，不能把 recipe 当作生产安全承诺。
+> **快照说明**：本文基于 `main@3778dbf6d1a533ab478ecf5ddaa11449a47752b2`（v0.3.2，2026-08-29 扫描）整理。扩展函数签名和示例会随代码演进；本文中的命令全部是**示例，不保证在本机直接运行**。第三方工具、搜索服务和 sandbox 还涉及网络、凭据与隔离策略，不能把 recipe 当作生产安全承诺。
 
 slime 的核心扩展思路是：**用 Python import path 替换流水线中的一个窄环节，只有默认外循环不再适用时才替换整个 rollout。** 面试中不要只背参数名，应说清“为什么选这一层、输入输出契约是什么、怎样验证不会把错误 token 训练进去”。
 
 ## 1. import-path hook 到底是什么
 
-slime 的 loader 接受形如 `package.module.attribute` 的**点分路径**：先 `importlib.import_module(package.module)`，再 `getattr(attribute)`，实现见 [`load_function`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/misc.py#L37)。因此：
+slime 的 loader 接受形如 `package.module.attribute` 的**点分路径**：先 `importlib.import_module(package.module)`，再 `getattr(attribute)`，实现见 [`load_function`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/misc.py#L39)。因此：
 
 - 这里的可靠格式是 `your_pkg.rollout.generate`，不是文件路径，也不是 `module.py:function`。
 - 包必须在 driver 和所有 Ray worker 的 `PYTHONPATH` 上；只在当前 shell `cd` 到某目录不够。
@@ -41,6 +41,7 @@ flowchart TD
 
 | 需求 | 首选参数 | 典型契约 | 什么时候升级到更重的 hook |
 |---|---|---|---|
+| 生成后、打分前的轻量逐样本后处理（改写、打标、清理） | `--rollout-sample-hook-path`（可重复，[#2250](https://github.com/THUDM/slime/pull/2250) 新增） | `hook(args, sample, *, rollout_id, evaluation, ...) -> Sample \| None`，sync/async 均可，list 输入递归保形处理 | 需要改变生成流程本身或跨 sample 协调时改用 custom generate / rollout |
 | 多轮、搜索、工具调用、RAG、环境交互 | `--custom-generate-function-path` | `async def generate(args, sample, sampling_params) -> Sample | list[Sample]` | 需要自定义全局调度、完全异步 buffer 或改变整个 batch 形状时 |
 | 替换整轮数据收集 | `--rollout-function-path` | `def generate_rollout(args, rollout_id, data_source, evaluation=False) -> RolloutFn*Output` | 已经无法复用默认 oversampling、RM、filter、abort 逻辑 |
 | verifier / 规则 / 外部 RM | `--custom-rm-path` | 常见为 `async def rm(args, sample, **kwargs) -> float | dict` | 需要整组样本共同评分时可用 `--group-rm`；但当前它不能直接消费 custom generate 返回的 fan-out 嵌套列表 |
@@ -49,7 +50,7 @@ flowchart TD
 | 自定义 advantage / return | `--custom-advantage-function-path` | `func(args, rollout_data)`，原地写入 `advantages`、`returns` | estimator 可由内置 GRPO/PPO/CISPO 等表达时直接用内置项 |
 | 新 Megatron 架构 | `--custom-model-provider-path` | `provider(pre_process, post_process, vp_stage=None) -> GPTModel` | 只是换权重或 tokenizer 时不需要模型插件 |
 
-完整 rollout/data/reward hook 在 manager 初始化时通过 import path 加载，见 [`RolloutManager.__init__`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L430)；custom advantage 的原地写入契约见 [`loss.py`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L661)，custom loss 的选择入口见 [`loss.py`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L1229)。
+完整 rollout/data/reward hook 在 manager 初始化时通过 import path 加载，见 [`RolloutManager.__init__`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L41)；custom advantage 的原地写入契约见 [`loss.py`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L704)，custom loss 的选择入口见 [`loss.py`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1282)。
 
 ### “最窄 hook”原则
 
@@ -71,7 +72,7 @@ flowchart TD
 | `loss_mask` | response 中每个 token 是否训练 | 长度必须严格等于 `response_length` |
 | `rollout_id` | 一次逻辑 rollout 的身份 | fan-out sibling 必须全部非空且相同 |
 
-字段定义见 [`Sample`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/utils/types.py#L93)。默认转换在 `loss_mask is None` 时把整个 response 置 1，`remove_sample=True` 时全部置 0，并断言 mask 长度正确，见 [`_convert_samples_to_train_data`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L709)。所以对工具场景来说，“不填 loss mask”通常是危险默认值：tool observation、模板、环境错误文本可能被当成模型输出训练。仅设置 `status=FAILED` 也不够；基础设施失败必须显式重试/回填、过滤、设置 `remove_sample=True` 或全零 mask。
+字段定义见 [`Sample`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/utils/types.py#L94)。默认转换在 `loss_mask is None` 时把整个 response 置 1，`remove_sample=True` 时全部置 0，并断言 mask 长度正确，见 [`_convert_samples_to_train_data`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L306)。所以对工具场景来说，“不填 loss mask”通常是危险默认值：tool observation、模板、环境错误文本可能被当成模型输出训练。仅设置 `status=FAILED` 也不够；基础设施失败必须显式重试/回填、过滤、设置 `remove_sample=True` 或全零 mask。
 
 ## 4. fan-out：ID、prompt 分组与 loss mask 的三重契约
 
@@ -86,11 +87,11 @@ flowchart TD
 
 三个字段解决不同问题：
 
-- `rollout_id` 决定**计数和归约单位**。同一 fan-out 的 siblings 共享 id，训练 step 按 rollout 而不是按 fan-out 后的样本数计数；manager 会为整个 rollout 预计算 loss-mask 总量作为 denominator，见 [`rollout.py`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L759)。
+- `rollout_id` 决定**计数和归约单位**。同一 fan-out 的 siblings 共享 id，训练 step 按 rollout 而不是按 fan-out 后的样本数计数；manager 会为整个 rollout 预计算 loss-mask 总量作为 denominator，见 [`rollout.py`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/ray/rollout.py#L356)。
 - `group_index` 决定**reward normalization 的 prompt 组**。可变 fan-out 时，默认固定 reshape 会失败；若要逻辑 rollout 等权，应先在 prompt 组内按 `rollout_id` 聚合 reward，再归一化并广播回 siblings。
 - `loss_mask` 决定**哪些 response token 产生梯度**。prompt 不在 response mask 中；response 内的模型 token 通常为 1，模板、工具 observation、环境反馈、人工拼接文字通常为 0。
 
-compact/subagent 三层嵌套输出会被显式校验：每个 sibling 都必须有相同的非空 `rollout_id`，否则立即断言失败，见 [`_validate_rollout_id_annotated`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/ray/rollout.py#L898)。
+compact/subagent 三层嵌套输出会被显式校验：每个 sibling 都必须有相同的非空 `rollout_id`，否则立即断言失败，见 [`validate_rollout_id_annotated`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/observability/rollout_data_utils.py#L92)。
 
 ### 一个安全的 fan-out 伪代码
 
@@ -117,11 +118,11 @@ async def generate(args, sample, sampling_params):
 
 ## 5. 方案 walkthrough A：数学 + 搜索工具
 
-### 目标
+### 数学搜索目标
 
 模型对数学题可多轮搜索，最终答案由规则 verifier 评分；搜索结果不参与梯度。
 
-### 设计
+### 数学搜索设计
 
 1. 默认 `sglang_rollout` 负责 batch、并发和动态采样。
 2. `custom generate` 实现 `thought → search query → observation → ... → answer`。
@@ -153,9 +154,9 @@ sequenceDiagram
 --rollout-max-response-len 4096
 ```
 
-仓库 recipe [`examples/search-r1`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/search-r1/README.md#code-structure) 正是“custom generate + custom RM”的参考。它证明仓库提供了一种接法，不代表搜索服务 SLA、索引质量或外部 API 成本已经由 slime 保证。
+仓库 recipe [`examples/search-r1`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/search-r1/README.md#code-structure) 正是“custom generate + custom RM”的参考。它证明仓库提供了一种接法，不代表搜索服务 SLA、索引质量或外部 API 成本已经由 slime 保证。
 
-### 验收
+### 数学搜索验收
 
 - dump 中能逐 token 对齐 `tokens/response_length/loss_mask`。
 - 搜索 observation 的 mask 全为 0，最终 answer 有非零可训练 token。
@@ -164,11 +165,13 @@ sequenceDiagram
 
 ## 6. 方案 walkthrough B：代码 Agent + sandbox + multi-agent fan-out
 
-### 目标
+这里的 multi-agent 仍是默认 rollout 外循环中的 `--custom-generate-function-path` 扩展，不是 `--rollout-function-path` 的整轮替换；仓库脚本加载 `examples.multi_agent.rollout_with_multi_agents.generate_with_multi_agents`，见 [`examples/multi_agent/README.md`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/multi_agent/README.md#L31)。执行 trace 的采集与聚合已归入 [`slime/observability/trace_utils.py`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/observability/trace_utils.py#L345)，viewer 的使用放在可观测性文档，不应被描述为 multi-agent hook 自带契约；本章只要求扩展正确填充 Sample/trace 数据，部署与解释见 [可观测性文档](../advanced/observability.md)。
+
+### 代码 Agent 目标
 
 模型在隔离环境里读代码、编辑、运行测试；subagent 与主 agent 分支都作为一次逻辑 rollout 的训练片段，最终 patch 在另一干净环境评分。
 
-### 设计
+### 代码 Agent 设计
 
 1. `custom generate` 为每个 sample 创建短生命周期 sandbox，准备仓库与问题。
 2. agent harness 通过 SGLang adapter 发消息并调用 Read/Edit/Grep/Bash/Agent 等工具。
@@ -185,7 +188,7 @@ sequenceDiagram
 --save-debug-rollout-data /secure/debug/rollout_{rollout_id}.pt
 ```
 
-参考实现地图见 [`examples/coding_agent_rl`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/coding_agent_rl/README.md#running-the-script)。该 README 描述了 per-sample sandbox、干净 evaluator 与 fan-out trajectory；这是 recipe，不等于任意 sandbox provider 都达到生产隔离等级。
+参考实现地图见 [`examples/coding_agent_rl`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/coding_agent_rl/README.md#running-the-script)。该 README 描述了 per-sample sandbox、干净 evaluator 与 fan-out trajectory；这是 recipe，不等于任意 sandbox provider 都达到生产隔离等级。
 
 ### 失败策略
 
@@ -199,11 +202,11 @@ sequenceDiagram
 
 ## 7. 方案 walkthrough C：多轮 VLM + 环境反馈
 
-### 目标
+### 多轮 VLM 目标
 
 输入图片和几何题；模型可多轮调用环境获得提示，最终数学答案计分。
 
-### 设计
+### 多轮 VLM 设计
 
 1. 数据层将 image path/URL 映射到 `multimodal_inputs`；processor 产生训练侧 multimodal inputs。
 2. 这个仓库示例复用默认 rollout 外循环，只以 custom generate 控制多轮图文上下文、SGLang 请求和 log-prob 对齐；只有还要改全局 batch 调度时才升级为完整 `--rollout-function-path`。
@@ -220,9 +223,9 @@ sequenceDiagram
 --rm-type math
 ```
 
-单轮入口见 [`examples/geo3k_vlm`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/geo3k_vlm/README.md#reproduce)，多轮环境和 rollout 职责见 [`examples/geo3k_vlm_multi_turn`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/geo3k_vlm_multi_turn/README.md#what-each-file-does)。
+单轮入口见 [`examples/geo3k_vlm`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/geo3k_vlm/README.md#reproduce)，多轮环境和 rollout 职责见 [`examples/geo3k_vlm_multi_turn`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/geo3k_vlm_multi_turn/README.md#what-each-file-does)。
 
-### 验收
+### 多轮 VLM 验收
 
 - 图片在 driver、rollout worker 和 trainer 上均可访问，或已转为明确可传输的数据。
 - 同一 sample 的 multimodal token 展开、总 token、response span 和 loss mask 一致。
@@ -231,7 +234,7 @@ sequenceDiagram
 
 ## 8. 方案 walkthrough D：OPD（在策略蒸馏）
 
-OPD 不是新的 advantage estimator，而是在基础 estimator 的 advantage 上叠加 teacher-student token KL；源码在 [`apply_opd_kl_to_advantages`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L620)。
+OPD 不是新的 advantage estimator，而是在基础 estimator 的 advantage 上叠加 teacher-student token KL；源码在 [`apply_opd_kl_to_advantages`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L663)。
 
 | 模式 | 教师在哪里 | 设计重点 |
 |---|---|---|
@@ -247,25 +250,25 @@ OPD 不是新的 advantage estimator，而是在基础 estimator 的 advantage �
 --custom-reward-post-process-path slime.rollout.on_policy_distillation.post_process_rewards
 ```
 
-可运行思路和模式比较见 [`examples/on_policy_distillation`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/on_policy_distillation/README.md#mode-comparison) 与 [OPD 文档](../advanced/on-policy-distillation.md#两种教师模式)。不要把示例结果外推到其他学生/教师、数据集和 KL 系数。
+可运行思路和模式比较见 [`examples/on_policy_distillation`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/on_policy_distillation/README.md#mode-comparison) 与 [OPD 文档](../advanced/on-policy-distillation.md#两种教师模式)。不要把示例结果外推到其他学生/教师、数据集和 KL 系数。
 
 ## 9. 数据源、loss、advantage 与模型插件
 
 ### 自定义 DataSource
 
-[`DataSource`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/data_source.py#L17) 要实现五件事：取样、退回样本、保存游标、加载游标、报告长度。默认全局数据源保存 `sample_offset`、epoch、group/sample index 和 metadata，见 [`data_source.py`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/data_source.py#L123)。
+[`DataSource`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/data_source.py#L17) 要实现五件事：取样、退回样本、保存游标、加载游标、报告长度。默认全局数据源保存 `sample_offset`、epoch、group/sample index 和 metadata，见 [`data_source.py`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/data_source.py#L123)。
 
 适合自定义 data source 的场景包括在线队列、课程学习、外部 replay buffer、按任务配额采样。关键不是“能拿到数据”，而是 `save/load` 与模型 checkpoint 使用同一个 rollout 边界，否则恢复后可能重复或跳过样本。
 
 ### custom advantage 与 custom loss
 
 - custom advantage 在 KL 已计算后运行，必须原地填充每个 sample 的 `advantages` 和 `returns`；保留现有 loss 可减少变量。
-- custom loss 直接替换训练目标，应明确返回 loss/metrics 约定、mask 归约、DP/CP 语义和数值精度。优先从 [`loss.py` 的内置分派](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/backends/megatron_utils/loss.py#L1264) 复制最接近的一支，再写契约测试。
+- custom loss 直接替换训练目标，应明确返回 loss/metrics 约定、mask 归约、DP/CP 语义和数值精度。优先从 [`loss.py` 的内置分派](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/loss.py#L1326) 复制最接近的一支，再写契约测试。
 - reward postprocess 位于 reward 与 advantage 之间；适合 group normalization 或 teacher log-prob 整理，不适合偷偷改变 token 序列。
 
 ### 模型插件
 
-模型 provider 解决的是 Megatron 如何构造架构；HF→Megatron bridge/映射解决权重名和张量布局；SGLang 是否支持该 HF 架构又是第三件事。真实接入要同时检查：
+模型 provider 解决的是 Megatron 如何构造架构；HF↔Megatron 权重映射解决权重名和张量布局；SGLang 是否支持该 HF 架构又是第三件事。真实接入要同时检查：
 
 1. HF config / tokenizer / processor；
 2. Megatron model provider；
@@ -273,29 +276,29 @@ OPD 不是新的 advantage estimator，而是在基础 estimator 的 advantage �
 4. SGLang serving 支持；
 5. 在线权重同步在 TP/EP 变化下的映射。
 
-仓库插件样例集中在 [`slime_plugins/models`](https://github.com/THUDM/slime/tree/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime_plugins/models) 与 [`slime_plugins/mbridge`](https://github.com/THUDM/slime/tree/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime_plugins/mbridge)。不要因存在一个 provider 文件就宣称端到端训练、checkpoint round-trip 和在线同步均已覆盖。
+HF↔Megatron 权重映射自 [PR #2251](https://github.com/THUDM/slime/pull/2251) 起已**内部化**：加载侧在 [`slime/backends/megatron_utils/hf_to_megatron/`](https://github.com/THUDM/slime/tree/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/backends/megatron_utils/hf_to_megatron)（按 `model_type` 注册 loader，覆盖 DeepSeek V3/V3.2、GLM4/4-MoE/DSA、Kimi-K2、Llama、MiMo、MiniMax-M2、Qwen2/3/3.5/Next 等家族），发布侧在 `megatron_to_hf/`；外部 `mbridge` / `megatron-bridge` 依赖与 `slime_plugins/mbridge/` 目录已删除。模型结构插件样例集中在 [`slime_plugins/models`](https://github.com/THUDM/slime/tree/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime_plugins/models)（近期新增 qwen3_5_vl，gemma4 / gpt-oss 支持已移除）。不要因存在一个 provider 文件就宣称端到端训练、checkpoint round-trip 和在线同步均已覆盖。
 
 ## 10. 真实场景与示例地图
 
 | 场景 | 推荐起点 | 仓库示例 | 读它时关注 |
 |---|---|---|---|
-| 数学规则 RM | 内置/自定义 RM | [`slime/rollout/rm_hub`](https://github.com/THUDM/slime/tree/aaf5c2092b01219fa0d5c2d323741d409086ca32/slime/rollout/rm_hub) | 答案抽取、二值/非二值 reward、异常语义 |
-| 搜索增强 | custom generate + RM | [`examples/search-r1`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/search-r1/README.md) | 多轮搜索、工具 observation mask、外部服务 |
-| Python 工具 | custom generate + sandbox | [`examples/retool`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/retool/README.md) | 工具 schema、执行隔离、reward |
-| 通用 agent tool loop | custom generate | [`examples/tau-bench`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/tau-bench/README.md) | user simulator、环境终态、API key |
-| 框架适配 | custom generate | [`examples/strands_sglang`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/strands_sglang/README.md) | text↔token 对齐；README 明示本地 subprocess 非隔离 |
-| Coding-agent RL | custom generate + sandbox + fan-out | [`examples/coding_agent_rl`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/coding_agent_rl/README.md) | 干净 evaluator、轨迹分支、超时 |
-| Multi-agent | custom generate | [`examples/multi_agent`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/multi_agent/README.md) | shared rollout_id、分支 reward/权重 |
-| VLM 单轮 | multimodal data + 默认 rollout | [`examples/geo3k_vlm`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/geo3k_vlm/README.md) | processor、图像可达性、RM 精度 |
-| VLM 多轮 | 完整 rollout 或 custom generate | [`examples/geo3k_vlm_multi_turn`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/geo3k_vlm_multi_turn/README.md) | 环境反馈、mask/log-prob 对齐 |
-| OPD | teacher + reward postprocess | [`examples/on_policy_distillation`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/on_policy_distillation/README.md) | teacher log-prob、KL、两种教师部署 |
-| long-tail 异步 | 完整 rollout | [`examples/fully_async`](https://github.com/THUDM/slime/blob/aaf5c2092b01219fa0d5c2d323741d409086ca32/examples/fully_async/README.md) | stale policy、buffer、取消和背压 |
+| 数学规则 RM | 内置/自定义 RM | [`slime/rollout/rm_hub`](https://github.com/THUDM/slime/tree/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/slime/rollout/rm_hub) | 答案抽取、二值/非二值 reward、异常语义 |
+| 搜索增强 | custom generate + RM | [`examples/search-r1`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/search-r1/README.md) | 多轮搜索、工具 observation mask、外部服务 |
+| Python 工具 | custom generate + sandbox | [`examples/retool`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/retool/README.md) | 工具 schema、执行隔离、reward |
+| 通用 agent tool loop | custom generate | [`examples/tau-bench`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/tau-bench/README.md) | user simulator、环境终态、API key |
+| 框架适配 | custom generate | [`examples/strands_sglang`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/strands_sglang/README.md) | text↔token 对齐；README 明示本地 subprocess 非隔离 |
+| Coding-agent RL | custom generate + sandbox + fan-out | [`examples/coding_agent_rl`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/coding_agent_rl/README.md) | 干净 evaluator、轨迹分支、超时 |
+| Multi-agent | custom generate | [`examples/multi_agent`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/multi_agent/README.md) | shared rollout_id、分支 reward/权重 |
+| VLM 单轮 | multimodal data + 默认 rollout | [`examples/geo3k_vlm`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/geo3k_vlm/README.md) | processor、图像可达性、RM 精度 |
+| VLM 多轮 | 完整 rollout 或 custom generate | [`examples/geo3k_vlm_multi_turn`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/geo3k_vlm_multi_turn/README.md) | 环境反馈、mask/log-prob 对齐 |
+| OPD | teacher + reward postprocess | [`examples/on_policy_distillation`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/on_policy_distillation/README.md) | teacher log-prob、KL、两种教师部署 |
+| long-tail 异步 | 完整 rollout | [`examples/fully_async`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/examples/fully_async/README.md) | stale policy、buffer、取消和背压 |
 
-这里的“示例”分三种成熟度：源码中的默认实现是项目行为；测试覆盖的契约有 CI 保护；`examples/` recipe 是参考配置。三者不能互换表述。
+这里的证据要分四级：源码实现说明当前可达行为；CPU contract/unit test 只保护纯逻辑；GPU E2E 只覆盖记录中的模型、硬件与拓扑；`examples/` recipe 和生产部署还需分别验证依赖、规模、安全与 SLA。四者不能互换表述。README 在项目层面声明 slime 用于 GLM-5.3 的 RL 训练（[`README.md`](https://github.com/THUDM/slime/blob/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/README.md#L20)），但本快照没有把 GLM-5.3 作为本章某个 example、固定配置或可复现 GPU E2E，因此这里只能引用为项目级声明，不能据此承诺模型支持范围、硬件规模或性能。
 
 ## 11. 扩展上线前的契约测试
 
-项目提供 plugin contract tests，覆盖路径加载、生成、完整 rollout 和 runtime hooks；入口见 [`tests/plugin_contracts`](https://github.com/THUDM/slime/tree/aaf5c2092b01219fa0d5c2d323741d409086ca32/tests/plugin_contracts)。对自己的扩展，至少验证：
+项目提供 plugin contract tests，覆盖路径加载、生成、完整 rollout 和 runtime hooks；入口见 [`tests/plugin_contracts`](https://github.com/THUDM/slime/tree/3778dbf6d1a533ab478ecf5ddaa11449a47752b2/tests/plugin_contracts)。对自己的扩展，至少验证：
 
 1. 点分路径可从干净 Python 进程 import。
 2. 函数签名、同步/异步形式和返回类型与调用点一致。
