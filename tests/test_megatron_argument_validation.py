@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import sys
 import types
@@ -43,7 +44,7 @@ def load_slime_arguments_module(monkeypatch):
     router_launch_mod = types.ModuleType("sglang_router.launch_router")
     sglang_arguments_mod = types.ModuleType("slime.backends.sglang_utils.arguments")
     sglang_external_mod = types.ModuleType("slime.backends.sglang_utils.external")
-    logging_utils_mod = types.ModuleType("slime.utils.logging_utils")
+    logging_utils_mod = types.ModuleType("slime.observability.logging_utils")
 
     router_launch_mod.RouterArgs = object
     sglang_arguments_mod.sglang_parse_args = lambda *args, **kwargs: None
@@ -55,7 +56,7 @@ def load_slime_arguments_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "sglang_router.launch_router", router_launch_mod)
     monkeypatch.setitem(sys.modules, "slime.backends.sglang_utils.arguments", sglang_arguments_mod)
     monkeypatch.setitem(sys.modules, "slime.backends.sglang_utils.external", sglang_external_mod)
-    monkeypatch.setitem(sys.modules, "slime.utils.logging_utils", logging_utils_mod)
+    monkeypatch.setitem(sys.modules, "slime.observability.logging_utils", logging_utils_mod)
 
     module_path = Path(__file__).resolve().parents[1] / "slime" / "utils" / "arguments.py"
     module_name = "test_slime_argument_validation_module"
@@ -255,21 +256,17 @@ def make_slime_validate_args(**overrides):
         update_weight_disk_dir=None,
         update_weight_local_checkpoint_dir=None,
         update_weight_mode="full",
+        rollout_temperature=1.0,
     )
     values.update(overrides)
     return types.SimpleNamespace(**values)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("megatron_to_hf_mode", ["raw", "bridge"])
-def test_slime_validate_args_preserves_explicit_start_rollout_id(monkeypatch, megatron_to_hf_mode):
-    """``--start-rollout-id`` is only a fallback when the user did not set it.
-
-    Both the bridge and the raw branch reset it when there is no resumable
-    Megatron checkpoint, which is exactly the case an explicit value is for.
-    """
+def test_slime_validate_args_preserves_explicit_start_rollout_id(monkeypatch):
+    """``--start-rollout-id`` is only a fallback when the user did not set it."""
     module = load_slime_arguments_module(monkeypatch)
-    args = make_slime_validate_args(start_rollout_id=100, megatron_to_hf_mode=megatron_to_hf_mode)
+    args = make_slime_validate_args(start_rollout_id=100)
 
     module.slime_validate_args(args)
 
@@ -277,14 +274,35 @@ def test_slime_validate_args_preserves_explicit_start_rollout_id(monkeypatch, me
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("megatron_to_hf_mode", ["raw", "bridge"])
-def test_slime_validate_args_defaults_start_rollout_id_to_zero(monkeypatch, megatron_to_hf_mode):
+def test_slime_validate_args_defaults_start_rollout_id_to_zero(monkeypatch):
     module = load_slime_arguments_module(monkeypatch)
-    args = make_slime_validate_args(start_rollout_id=None, megatron_to_hf_mode=megatron_to_hf_mode)
+    args = make_slime_validate_args(start_rollout_id=None)
 
     module.slime_validate_args(args)
 
     assert args.start_rollout_id == 0
+
+
+@pytest.mark.unit
+def test_slime_validate_args_rejects_equal_debug_data_paths(monkeypatch):
+    module = load_slime_arguments_module(monkeypatch)
+    args = make_slime_validate_args(
+        save_debug_rollout_data="/tmp/debug_{rollout_id}.pt",
+        save_debug_train_data="/tmp/debug_{rollout_id}.pt",
+    )
+
+    with pytest.raises(ValueError, match="--save-debug-train-data must not be equal"):
+        module.slime_validate_args(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("temperature", [0.0, -0.1])
+def test_slime_validate_args_rejects_non_positive_rollout_temperature(monkeypatch, temperature):
+    module = load_slime_arguments_module(monkeypatch)
+    args = make_slime_validate_args(rollout_temperature=temperature)
+
+    with pytest.raises(ValueError, match="--rollout-temperature must be > 0"):
+        module.slime_validate_args(args)
 
 
 @pytest.mark.unit
@@ -370,6 +388,19 @@ def test_update_weight_delta_requires_local_checkpoint_dir(monkeypatch):
 
     with pytest.raises(ValueError, match="requires --update-weight-local-checkpoint-dir"):
         module.slime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_force_fp8_ue8m0_scale_argument(monkeypatch):
+    module = load_slime_arguments_module(monkeypatch)
+    parser = argparse.ArgumentParser()
+    module.get_slime_extra_args_provider()(parser)
+
+    defaults = parser.parse_args(["--rollout-batch-size", "1"])
+    configured = parser.parse_args(["--rollout-batch-size", "1", "--force-fp8-ue8m0-scale"])
+
+    assert defaults.force_fp8_ue8m0_scale is False
+    assert configured.force_fp8_ue8m0_scale is True
 
 
 if __name__ == "__main__":
